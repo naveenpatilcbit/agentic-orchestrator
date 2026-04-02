@@ -1,0 +1,12 @@
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/bin/Debug/net9.0/FundOrchestrator.Contracts.deps.json
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/bin/Debug/net9.0/FundOrchestrator.Contracts.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/bin/Debug/net9.0/FundOrchestrator.Contracts.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.csproj.AssemblyReference.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.GeneratedMSBuildEditorConfig.editorconfig
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.AssemblyInfoInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.AssemblyInfo.cs
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.csproj.CoreCompileInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/refint/FundOrchestrator.Contracts.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/FundOrchestrator.Contracts.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Contracts/obj/Debug/net9.0/ref/FundOrchestrator.Contracts.dll

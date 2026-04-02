@@ -1,0 +1,11 @@
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/bin/Debug/net9.0/FundOrchestrator.Domain.deps.json
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/bin/Debug/net9.0/FundOrchestrator.Domain.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/bin/Debug/net9.0/FundOrchestrator.Domain.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.GeneratedMSBuildEditorConfig.editorconfig
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.AssemblyInfoInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.AssemblyInfo.cs
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.csproj.CoreCompileInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/refint/FundOrchestrator.Domain.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/FundOrchestrator.Domain.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Domain/obj/Debug/net9.0/ref/FundOrchestrator.Domain.dll

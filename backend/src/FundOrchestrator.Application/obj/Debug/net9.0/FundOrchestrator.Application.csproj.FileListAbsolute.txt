@@ -1,0 +1,17 @@
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Application.deps.json
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Application.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Application.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Contracts.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Domain.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Domain.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/bin/Debug/net9.0/FundOrchestrator.Contracts.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.csproj.AssemblyReference.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.GeneratedMSBuildEditorConfig.editorconfig
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.AssemblyInfoInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.AssemblyInfo.cs
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.csproj.CoreCompileInputs.cache
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrch.451FA990.Up2Date
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/refint/FundOrchestrator.Application.dll
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/FundOrchestrator.Application.pdb
+/Users/naveenkumarpatil/Documents/orchestrator design/backend/src/FundOrchestrator.Application/obj/Debug/net9.0/ref/FundOrchestrator.Application.dll
