@@ -8,6 +8,10 @@ Sample multi-agent fund administration orchestration app with:
 - `React + Vite` chat UI
 - polling-based conversation refresh
 
+Design document:
+
+- `docs/system-design.md`
+
 ## Local stack
 
 Start infra:
