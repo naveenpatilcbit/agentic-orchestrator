@@ -1,0 +1,7 @@
+.idea/
+.vscode/
+**/bin/
+**/obj/
+**/uploads/
+frontend/app/node_modules/
+frontend/app/dist/

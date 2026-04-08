@@ -1,7 +1,7 @@
 services:
   mongodb:
     image: mongo:7
-    container_name: fund-orchestrator-mongodb
+    container_name: conversational-orchestration-mongodb
     restart: unless-stopped
     ports:
       - "27018:27017"
@@ -15,7 +15,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3.13-management
-    container_name: fund-orchestrator-rabbitmq
+    container_name: conversational-orchestration-rabbitmq
     restart: unless-stopped
     ports:
       - "5672:5672"

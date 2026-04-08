@@ -848,17 +848,18 @@ Recovery should happen from persisted operation and review state, not by replayi
 
 ### Backend
 
-- routing: `backend/src/FundOrchestrator.Application/Operations/MessageRoutingService.cs`
-- orchestration: `backend/src/FundOrchestrator.Application/Conversations/ChatOrchestratorService.cs`
-- review continuation: `backend/src/FundOrchestrator.Application/Reviews/ReviewTaskService.cs`
-- agents: `backend/src/FundOrchestrator.Application/Agents/Agents.cs`
-- application LLM abstractions: `backend/src/FundOrchestrator.Application/Abstractions/StructuredLlm.cs`
-- provider-neutral LLM gateway: `backend/src/FundOrchestrator.Infrastructure/AI/MicrosoftExtensionsAiStructuredLlmClient.cs`
-- routing classifier: `backend/src/FundOrchestrator.Infrastructure/AI/LlmMessageIntentClassifier.cs`
-- input completion: `backend/src/FundOrchestrator.Infrastructure/AI/LlmAgentInputCompletionService.cs`
-- saga: `backend/src/FundOrchestrator.Worker/Sagas/OnboardingSaga.cs`
-- contracts: `backend/src/FundOrchestrator.Contracts`
-- repositories: `backend/src/FundOrchestrator.Infrastructure/Repositories/MongoRepositories.cs`
+- routing: `backend/src/Framework/ConversationalOrchestration.Application/Operations/MessageRoutingService.cs`
+- orchestration: `backend/src/Framework/ConversationalOrchestration.Application/Conversations/ChatOrchestratorService.cs`
+- review continuation: `backend/src/Framework/ConversationalOrchestration.Application/Reviews/ReviewTaskService.cs`
+- generic agent catalog: `backend/src/Framework/ConversationalOrchestration.Application/Agents/AgentCatalog.cs`
+- application LLM abstractions: `backend/src/Framework/ConversationalOrchestration.Application/Abstractions/StructuredLlm.cs`
+- provider-neutral LLM gateway: `backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/MicrosoftExtensionsAiStructuredLlmClient.cs`
+- routing classifier: `backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/LlmMessageIntentClassifier.cs`
+- input completion: `backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/LlmAgentInputCompletionService.cs`
+- fund-domain agents: `backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents`
+- fund onboarding saga: `backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/OnboardingSaga.cs`
+- contracts: `backend/src/Framework/ConversationalOrchestration.Contracts`
+- repositories: `backend/src/Framework/ConversationalOrchestration.Infrastructure/Repositories/MongoRepositories.cs`
 
 ### Frontend
 

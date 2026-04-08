@@ -1,4 +1,4 @@
-# Fund Orchestrator Sample
+# Conversational Orchestration Sample
 
 Sample multi-agent fund administration orchestration app with:
 
@@ -24,14 +24,14 @@ Run the API:
 
 ```bash
 cd backend
-$HOME/.dotnet/dotnet run --project src/FundOrchestrator.Api
+$HOME/.dotnet/dotnet run --project src/Hosts/ConversationalOrchestration.Api
 ```
 
 Run the workflow worker:
 
 ```bash
 cd backend
-$HOME/.dotnet/dotnet run --project src/FundOrchestrator.Worker
+$HOME/.dotnet/dotnet run --project src/Hosts/ConversationalOrchestration.Worker
 ```
 
 Run the frontend:
@@ -75,4 +75,3 @@ MongoDB exposed port:
 - long-running onboarding is modeled as a saga
 - financial or record-creating steps end in review gates or drafts
 - chat is the user-facing projection, not the workflow source of truth
-# agentic-orchestrator

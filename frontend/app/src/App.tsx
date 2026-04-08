@@ -62,7 +62,7 @@ function actionTone(type: string) {
 
 export default function App() {
   const [conversationId, setConversationId] = useState<string | null>(() => {
-    return localStorage.getItem("fund-orchestrator-conversation");
+    return localStorage.getItem("conversational-orchestration-conversation");
   });
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null);
   const [conversationHistory, setConversationHistory] = useState<ConversationSummary[]>([]);
@@ -76,9 +76,9 @@ export default function App() {
 
   useEffect(() => {
     if (conversationId) {
-      localStorage.setItem("fund-orchestrator-conversation", conversationId);
+      localStorage.setItem("conversational-orchestration-conversation", conversationId);
     } else {
-      localStorage.removeItem("fund-orchestrator-conversation");
+      localStorage.removeItem("conversational-orchestration-conversation");
     }
   }, [conversationId]);
 
@@ -225,7 +225,7 @@ export default function App() {
   }
 
   function resetConversation() {
-    localStorage.removeItem("fund-orchestrator-conversation");
+    localStorage.removeItem("conversational-orchestration-conversation");
     setConversationId(null);
     setSnapshot(null);
     setMessage("");
