@@ -93,6 +93,21 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         return (await GetSnapshotAsync(conversation.Id, context, cancellationToken))!;
     }
 
+    public async Task<ConversationSnapshotResponse> CreateConversationAsync(
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var conversation = new ConversationThread
+        {
+            TenantId = context.TenantId,
+            Title = "New conversation"
+        };
+
+        await _conversationRepository.UpsertAsync(conversation, cancellationToken);
+
+        return (await GetSnapshotAsync(conversation.Id, context, cancellationToken))!;
+    }
+
     public async Task<ConversationSnapshotResponse?> GetSnapshotAsync(
         string conversationId,
         TenantExecutionContext context,
@@ -292,6 +307,11 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             var existing = await _conversationRepository.GetAsync(requestedConversationId, context.TenantId, cancellationToken);
             if (existing is not null)
             {
+                if (existing.Title == "New conversation")
+                {
+                    existing.Title = BuildConversationTitle(openingMessage);
+                }
+
                 existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 await _conversationRepository.UpsertAsync(existing, cancellationToken);
                 return existing;
@@ -302,12 +322,15 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         {
             Id = string.IsNullOrWhiteSpace(requestedConversationId) ? Guid.NewGuid().ToString("N") : requestedConversationId,
             TenantId = context.TenantId,
-            Title = openingMessage.Length <= 56 ? openingMessage : $"{openingMessage[..56]}..."
+            Title = BuildConversationTitle(openingMessage)
         };
 
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
         return conversation;
     }
+
+    private static string BuildConversationTitle(string openingMessage) =>
+        openingMessage.Length <= 56 ? openingMessage : $"{openingMessage[..56]}...";
 
     private async Task<IReadOnlyCollection<FileAsset>> LoadAttachmentsAsync(
         IReadOnlyCollection<string>? attachmentIds,

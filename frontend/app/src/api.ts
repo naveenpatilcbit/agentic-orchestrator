@@ -19,7 +19,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 export async function sendMessage(payload: {
-  conversationId?: string;
+  conversationId?: string | null;
   message: string;
   attachmentIds?: string[];
 }): Promise<ConversationSnapshot> {
@@ -31,6 +31,15 @@ export async function sendMessage(payload: {
       message: payload.message,
       attachmentIds: payload.attachmentIds ?? [],
     }),
+  });
+
+  return parseResponse<ConversationSnapshot>(response);
+}
+
+export async function createConversation(): Promise<ConversationSnapshot> {
+  const response = await fetch(`${API_BASE}/api/chat/conversations`, {
+    method: "POST",
+    headers: defaultHeaders,
   });
 
   return parseResponse<ConversationSnapshot>(response);

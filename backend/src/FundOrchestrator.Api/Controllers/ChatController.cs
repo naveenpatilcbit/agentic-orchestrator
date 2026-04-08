@@ -27,13 +27,12 @@ public sealed class ChatController : ControllerBase
         return Ok(response);
     }
 
-    [HttpGet("conversations/{conversationId}")]
-    public async Task<ActionResult<ConversationSnapshotResponse>> GetConversationAsync(
-        string conversationId,
+    [HttpPost("conversations")]
+    public async Task<ActionResult<ConversationSnapshotResponse>> CreateConversationAsync(
         CancellationToken cancellationToken)
     {
-        var snapshot = await _chatOrchestratorService.GetSnapshotAsync(conversationId, _requestContextAccessor.Current, cancellationToken);
-        return snapshot is null ? NotFound() : Ok(snapshot);
+        var response = await _chatOrchestratorService.CreateConversationAsync(_requestContextAccessor.Current, cancellationToken);
+        return Ok(response);
     }
 
     [HttpGet("conversations")]
@@ -42,5 +41,14 @@ public sealed class ChatController : ControllerBase
     {
         var conversations = await _chatOrchestratorService.ListConversationsAsync(_requestContextAccessor.Current, cancellationToken);
         return Ok(conversations);
+    }
+
+    [HttpGet("conversations/{conversationId}")]
+    public async Task<ActionResult<ConversationSnapshotResponse>> GetConversationAsync(
+        string conversationId,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await _chatOrchestratorService.GetSnapshotAsync(conversationId, _requestContextAccessor.Current, cancellationToken);
+        return snapshot is null ? NotFound() : Ok(snapshot);
     }
 }

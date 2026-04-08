@@ -10,6 +10,7 @@ import type {
   ReviewTask,
 } from "./types";
 import {
+  createConversation,
   getConversation,
   listConversations,
   sendMessage,
@@ -23,10 +24,6 @@ const samplePrompts = [
   "What is the status of onboarding?",
   "Approve the extraction review",
 ];
-
-function createConversationId() {
-  return crypto.randomUUID().replace(/-/g, "");
-}
 
 function formatTime(value: string) {
   return new Date(value).toLocaleTimeString([], {
@@ -64,19 +61,25 @@ function actionTone(type: string) {
 }
 
 export default function App() {
-  const [conversationId, setConversationId] = useState<string>(() => {
-    return localStorage.getItem("fund-orchestrator-conversation") ?? createConversationId();
+  const [conversationId, setConversationId] = useState<string | null>(() => {
+    return localStorage.getItem("fund-orchestrator-conversation");
   });
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null);
   const [conversationHistory, setConversationHistory] = useState<ConversationSummary[]>([]);
   const [message, setMessage] = useState("");
   const [uploadQueue, setUploadQueue] = useState<FileAsset[]>([]);
+  const [isFilesOpen, setIsFilesOpen] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    localStorage.setItem("fund-orchestrator-conversation", conversationId);
+    if (conversationId) {
+      localStorage.setItem("fund-orchestrator-conversation", conversationId);
+    } else {
+      localStorage.removeItem("fund-orchestrator-conversation");
+    }
   }, [conversationId]);
 
   useEffect(() => {
@@ -84,7 +87,7 @@ export default function App() {
 
     const refresh = async () => {
       const [conversationResult, historyResult] = await Promise.allSettled([
-        getConversation(conversationId),
+        conversationId ? getConversation(conversationId) : Promise.resolve(null),
         listConversations(),
       ]);
 
@@ -100,6 +103,9 @@ export default function App() {
 
       if (historyResult.status === "fulfilled") {
         setConversationHistory(historyResult.value);
+        setHistoryError(null);
+      } else {
+        setHistoryError("Unable to load previous threads. Restart the API if it is still running from an older build.");
       }
     };
 
@@ -110,6 +116,15 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [conversationId]);
+
+  async function refreshConversationHistory() {
+    try {
+      setConversationHistory(await listConversations());
+      setHistoryError(null);
+    } catch {
+      setHistoryError("Unable to load previous threads. Restart the API if it is still running from an older build.");
+    }
+  }
 
   const activeOperations = useMemo(
     () =>
@@ -142,6 +157,7 @@ export default function App() {
       setConversationId(data.conversationId);
       setMessage("");
       setUploadQueue([]);
+      await refreshConversationHistory();
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "Unable to send message");
     } finally {
@@ -152,12 +168,19 @@ export default function App() {
   async function handleFilesSelected(files: FileList | null) {
     if (!files || files.length === 0) return;
 
-    const workingConversationId = conversationId || createConversationId();
-    setConversationId(workingConversationId);
     setIsBusy(true);
     setError(null);
 
     try {
+      let workingConversationId = conversationId;
+      if (!workingConversationId) {
+        const conversation = await createConversation();
+        workingConversationId = conversation.conversationId;
+        setConversationId(workingConversationId);
+        setSnapshot(conversation);
+        await refreshConversationHistory();
+      }
+
       const stored = await uploadFiles(workingConversationId, Array.from(files));
       setUploadQueue((current) => [...current, ...stored]);
     } catch (uploadError) {
@@ -202,9 +225,8 @@ export default function App() {
   }
 
   function resetConversation() {
-    const nextConversationId = createConversationId();
-    localStorage.setItem("fund-orchestrator-conversation", nextConversationId);
-    setConversationId(nextConversationId);
+    localStorage.removeItem("fund-orchestrator-conversation");
+    setConversationId(null);
     setSnapshot(null);
     setMessage("");
     setUploadQueue([]);
@@ -253,8 +275,10 @@ export default function App() {
               <h2>Previous Threads</h2>
               <span>{conversationHistory.length}</span>
             </div>
-            <div className="stack">
-              {conversationHistory.length ? (
+            <div className="stack thread-list">
+              {historyError ? (
+                <p className="history-warning">{historyError}</p>
+              ) : conversationHistory.length ? (
                 conversationHistory.map((thread) => (
                   <button
                     key={thread.conversationId}
@@ -280,41 +304,6 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel-section">
-            <div className="panel-heading">
-              <h2>Uploaded Files</h2>
-              <span>{(snapshot?.files.length ?? 0) + uploadQueue.length}</span>
-            </div>
-            <div className="file-stack">
-              {uploadQueue.map((file) => (
-                <FilePill key={file.id} file={file} pending />
-              ))}
-              {snapshot?.files.map((file) => (
-                <FilePill key={file.id} file={file} />
-              ))}
-              {snapshot?.files.length === 0 && uploadQueue.length === 0 ? (
-                <p className="muted">Upload agreements, subscription docs, or templates before you ask.</p>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="panel-section">
-            <div className="panel-heading">
-              <h2>Active Work</h2>
-              <span>{activeOperations.length}</span>
-            </div>
-            <div className="stack">
-              {activeOperations.map((operation) => (
-                <OperationCard key={operation.id} operation={operation} />
-              ))}
-              {activeOperations.length === 0 ? (
-                <p className="muted">
-                  No running work yet. Start onboarding, then ask for a one-pager in the same thread
-                  to see concurrent operations handled side by side.
-                </p>
-              ) : null}
-            </div>
-          </section>
         </aside>
 
         <section className="panel conversation-panel">
@@ -326,7 +315,7 @@ export default function App() {
                 message is clearly attached to it.
               </p>
             </div>
-            <span className="conversation-id">#{conversationId.slice(0, 8)}</span>
+            <span className="conversation-id">{conversationId ? `#${conversationId.slice(0, 8)}` : "new"}</span>
           </div>
 
           <div className="message-stream">
@@ -400,13 +389,50 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel-section audit-note">
-            <h2>Routing Rule</h2>
-            <p>
-              If the thread contains an active onboarding flow and you ask for a one-pager, the system
-              starts a second operation instead of hijacking the first. Approval language only auto-routes
-              when there is a single open review task.
-            </p>
+          <section className="panel-section">
+            <div className="panel-heading">
+              <h2>Active Work</h2>
+              <span>{activeOperations.length}</span>
+            </div>
+            <div className="stack">
+              {activeOperations.map((operation) => (
+                <OperationCard key={operation.id} operation={operation} />
+              ))}
+              {activeOperations.length === 0 ? (
+                <p className="muted">
+                  No running work yet. Start onboarding, then ask for a one-pager in the same thread
+                  to see concurrent operations handled side by side.
+                </p>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <button
+              className="accordion-heading"
+              type="button"
+              aria-expanded={isFilesOpen}
+              onClick={() => setIsFilesOpen((current) => !current)}
+            >
+              <span>
+                <strong>Uploaded Files</strong>
+                <small>{(snapshot?.files.length ?? 0) + uploadQueue.length} attached</small>
+              </span>
+              <span className={`accordion-chevron ${isFilesOpen ? "open" : ""}`}>⌄</span>
+            </button>
+            {isFilesOpen ? (
+              <div className="file-stack">
+                {uploadQueue.map((file) => (
+                  <FilePill key={file.id} file={file} pending />
+                ))}
+                {snapshot?.files.map((file) => (
+                  <FilePill key={file.id} file={file} />
+                ))}
+                {snapshot?.files.length === 0 && uploadQueue.length === 0 ? (
+                  <p className="muted">Upload agreements, subscription docs, or templates before you ask.</p>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         </aside>
       </main>
@@ -472,15 +498,15 @@ function ReviewCard({
         <span>{task.taskType}</span>
       </div>
       <p>{operation?.title ?? "Unknown operation"}</p>
-      <pre>{task.proposedPayloadJson}</pre>
       <div className="review-actions">
-        <button className="secondary-button" onClick={onReject}>
+        <button className="secondary-button" type="button" onClick={onReject}>
           Reject
         </button>
-        <button className="primary-button" onClick={onApprove}>
+        <button className="primary-button review-approve-button" type="button" onClick={onApprove}>
           Approve
         </button>
       </div>
+      <pre>{task.proposedPayloadJson}</pre>
     </article>
   );
 }

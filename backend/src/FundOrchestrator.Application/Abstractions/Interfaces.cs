@@ -76,7 +76,18 @@ public interface IAgentCatalog
 {
     IReadOnlyCollection<AgentDefinition> List();
     IAgent Resolve(string agentId);
-    AgentDefinition? TryClassifyNewWork(string userMessage, bool hasAttachments);
+}
+
+public interface IMessageIntentClassifier
+{
+    Task<RoutingDecision> ClassifyAsync(
+        string message,
+        ConversationThread conversation,
+        IReadOnlyCollection<AgentOperation> operations,
+        IReadOnlyCollection<ReviewTask> reviewTasks,
+        IReadOnlyCollection<FileAsset> attachments,
+        IReadOnlyCollection<AgentDefinition> availableAgents,
+        CancellationToken cancellationToken);
 }
 
 public interface IAgent
@@ -107,6 +118,10 @@ public interface IAgent
 
 public interface IChatOrchestratorService
 {
+    Task<ConversationSnapshotResponse> CreateConversationAsync(
+        TenantExecutionContext context,
+        CancellationToken cancellationToken);
+
     Task<ConversationSnapshotResponse> HandleMessageAsync(
         ChatMessageRequest request,
         TenantExecutionContext context,

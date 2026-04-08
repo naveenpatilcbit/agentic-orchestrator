@@ -27,28 +27,6 @@ public sealed class AgentCatalog : IAgentCatalog
         _agents.TryGetValue(agentId, out var agent)
             ? agent
             : throw new InvalidOperationException($"Unknown agent '{agentId}'.");
-
-    public AgentDefinition? TryClassifyNewWork(string userMessage, bool hasAttachments)
-    {
-        var normalized = userMessage.ToLowerInvariant();
-
-        if (normalized.Contains("capital call") || normalized.Contains("notice"))
-        {
-            return Resolve(AgentIds.NoticeCreation).Definition;
-        }
-
-        if (normalized.Contains("one pager") || normalized.Contains("one-pager") || normalized.Contains("presentation"))
-        {
-            return Resolve(AgentIds.OnePager).Definition;
-        }
-
-        if (hasAttachments || normalized.Contains("onboard") || normalized.Contains("fund creation") || normalized.Contains("agreement"))
-        {
-            return Resolve(AgentIds.FundOnboarding).Definition;
-        }
-
-        return null;
-    }
 }
 
 public sealed class NoticeCreationAgent : IAgent
@@ -57,8 +35,7 @@ public sealed class NoticeCreationAgent : IAgent
         AgentIds.NoticeCreation,
         "Notice Creation Helper",
         "Creates a draft capital call notice and opens the correct page with prefilled data.",
-        AgentExecutionMode.InlineFunction,
-        ["capital call", "notice", "lp contribution", "notice draft"]);
+        AgentExecutionMode.InlineFunction);
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
@@ -199,8 +176,7 @@ public sealed class OnePagerAgent : IAgent
         AgentIds.OnePager,
         "One Pager Generation Agent",
         "Builds a one-pager draft using internal portfolio data and the selected format.",
-        AgentExecutionMode.InlineFunction,
-        ["one pager", "one-pager", "presentation", "company snapshot"]);
+        AgentExecutionMode.InlineFunction);
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
@@ -336,8 +312,7 @@ public sealed class FundOnboardingAgent : IAgent
         AgentIds.FundOnboarding,
         "Fund Onboarding Helper",
         "Starts the onboarding workflow, waits for external classification, and resumes after human review.",
-        AgentExecutionMode.SagaWorkflow,
-        ["onboarding", "fund creation", "documents", "agreements"]);
+        AgentExecutionMode.SagaWorkflow);
 
     public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,

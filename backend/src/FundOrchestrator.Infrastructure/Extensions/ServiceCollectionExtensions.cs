@@ -4,6 +4,7 @@ using FundOrchestrator.Application.Conversations;
 using FundOrchestrator.Application.Operations;
 using FundOrchestrator.Application.Reviews;
 using FundOrchestrator.Contracts.Messaging;
+using FundOrchestrator.Infrastructure.AI;
 using FundOrchestrator.Infrastructure.Configuration;
 using FundOrchestrator.Infrastructure.Data;
 using FundOrchestrator.Infrastructure.Files;
@@ -33,6 +34,7 @@ public static class ServiceCollectionExtensions
     {
         services.Configure<MongoDbOptions>(configuration.GetSection(MongoDbOptions.SectionName));
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
+        services.Configure<RoutingLlmOptions>(configuration.GetSection(RoutingLlmOptions.SectionName));
 
         services.AddSingleton<IMongoClient>(serviceProvider =>
         {
@@ -40,6 +42,7 @@ public static class ServiceCollectionExtensions
             return new MongoClient(options.ConnectionString);
         });
 
+        services.AddHttpClient<IMessageIntentClassifier, OpenAiMessageIntentClassifier>();
         services.AddSingleton<MongoCollections>();
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();

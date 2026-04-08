@@ -1,5 +1,4 @@
 using FundOrchestrator.Application.Abstractions;
-using FundOrchestrator.Domain.Agents;
 using FundOrchestrator.Domain.Files;
 using FundOrchestrator.Domain.Operations;
 using FundOrchestrator.Domain.Reviews;
@@ -10,13 +9,15 @@ namespace FundOrchestrator.Application.Operations;
 public sealed class MessageRoutingService : IMessageRoutingService
 {
     private readonly IAgentCatalog _agentCatalog;
+    private readonly IMessageIntentClassifier _intentClassifier;
 
-    public MessageRoutingService(IAgentCatalog agentCatalog)
+    public MessageRoutingService(IAgentCatalog agentCatalog, IMessageIntentClassifier intentClassifier)
     {
         _agentCatalog = agentCatalog;
+        _intentClassifier = intentClassifier;
     }
 
-    public Task<RoutingDecision> DecideAsync(
+    public async Task<RoutingDecision> DecideAsync(
         string message,
         ConversationThread conversation,
         IReadOnlyCollection<AgentOperation> operations,
@@ -24,169 +25,115 @@ public sealed class MessageRoutingService : IMessageRoutingService
         IReadOnlyCollection<FileAsset> attachments,
         CancellationToken cancellationToken)
     {
-        var normalized = message.Trim().ToLowerInvariant();
         var activeOperations = operations
             .Where(static operation => operation.Status is not AgentOperationStatus.Completed and not AgentOperationStatus.Failed and not AgentOperationStatus.Cancelled)
             .OrderByDescending(operation => operation.UpdatedAtUtc)
             .ToArray();
 
-        var referencedOperation = FindReferencedOperation(normalized, activeOperations);
-        var referencedTask = FindReferencedTask(normalized, reviewTasks, operations);
+        var classifierDecision = await _intentClassifier.ClassifyAsync(
+            message,
+            conversation,
+            activeOperations,
+            reviewTasks,
+            attachments,
+            _agentCatalog.List(),
+            cancellationToken);
 
-        if (LooksLikeReviewDecision(normalized))
-        {
-            if (referencedTask is not null)
-            {
-                return Task.FromResult(new RoutingDecision(
-                    RoutingDecisionType.RespondToReviewTask,
-                    OperationId: referencedTask.OperationId,
-                    ReviewTaskId: referencedTask.Id,
-                    Explanation: "Matched an explicit review task reference."));
-            }
-
-            var openTasks = reviewTasks.Where(static task => task.Status == ReviewTaskStatus.Open).ToArray();
-            if (openTasks.Length == 1)
-            {
-                return Task.FromResult(new RoutingDecision(
-                    RoutingDecisionType.RespondToReviewTask,
-                    OperationId: openTasks[0].OperationId,
-                    ReviewTaskId: openTasks[0].Id,
-                    Explanation: "Single open review task matched the approval message."));
-            }
-
-            if (openTasks.Length > 1)
-            {
-                return Task.FromResult(new RoutingDecision(
-                    RoutingDecisionType.AmbiguousNeedClarification,
-                    Explanation: "Multiple open review tasks exist, so approval text is ambiguous."));
-            }
-        }
-
-        if (LooksLikeStatusQuery(normalized))
-        {
-            if (referencedOperation is not null)
-            {
-                return Task.FromResult(new RoutingDecision(
-                    RoutingDecisionType.AskStatus,
-                    OperationId: referencedOperation.Id,
-                    Explanation: "Status request matched a specific active operation."));
-            }
-
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.AskStatus,
-                Explanation: "Provide a status summary of active work in the conversation."));
-        }
-
-        var classifiedNewWork = _agentCatalog.TryClassifyNewWork(normalized, attachments.Count > 0);
-        if (classifiedNewWork is not null)
-        {
-            if (referencedOperation is not null && referencedOperation.AgentId == classifiedNewWork.Id && !LooksLikeClearlyNewRequest(normalized))
-            {
-                return Task.FromResult(new RoutingDecision(
-                    RoutingDecisionType.ContinueOperation,
-                    AgentId: referencedOperation.AgentId,
-                    OperationId: referencedOperation.Id,
-                    Explanation: "Message appears to continue the same agent context."));
-            }
-
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.StartNewOperation,
-                AgentId: classifiedNewWork.Id,
-                Explanation: "Detected a new request for a supported agent."));
-        }
-
-        var clarificationCandidate = activeOperations.FirstOrDefault(static operation => operation.Status == AgentOperationStatus.ClarificationRequired);
-        if (clarificationCandidate is not null)
-        {
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.ContinueOperation,
-                AgentId: clarificationCandidate.AgentId,
-                OperationId: clarificationCandidate.Id,
-                Explanation: "Continuing an operation that is waiting for clarification."));
-        }
-
-        if (referencedOperation is not null)
-        {
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.ContinueOperation,
-                AgentId: referencedOperation.AgentId,
-                OperationId: referencedOperation.Id,
-                Explanation: "Message explicitly referenced an existing operation."));
-        }
-
-        if (activeOperations.Length > 1)
-        {
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.AmbiguousNeedClarification,
-                Explanation: "Multiple active operations exist and the new message is not clearly a new request."));
-        }
-
-        if (activeOperations.Length == 1)
-        {
-            return Task.FromResult(new RoutingDecision(
-                RoutingDecisionType.ContinueOperation,
-                AgentId: activeOperations[0].AgentId,
-                OperationId: activeOperations[0].Id,
-                Explanation: "Using the single active operation as the best continuation candidate."));
-        }
-
-        return Task.FromResult(new RoutingDecision(
-            RoutingDecisionType.AmbiguousNeedClarification,
-            Explanation: "Unable to confidently map the request to a supported agent."));
+        return NormalizeDecision(
+            classifierDecision,
+            activeOperations,
+            reviewTasks,
+            _agentCatalog.List().Select(agent => agent.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
-    private static bool LooksLikeReviewDecision(string message) =>
-        message.Contains("approve") || message.Contains("reject") || message.Contains("looks good") || message.Contains("ship it");
-
-    private static bool LooksLikeStatusQuery(string message) =>
-        message.Contains("status") || message.Contains("where are we") || message.Contains("progress");
-
-    private static bool LooksLikeClearlyNewRequest(string message) =>
-        message.StartsWith("create ") || message.StartsWith("generate ") || message.StartsWith("start ") || message.StartsWith("also ");
-
-    private static AgentOperation? FindReferencedOperation(string message, IReadOnlyCollection<AgentOperation> operations)
-    {
-        foreach (var operation in operations)
-        {
-            if (!string.IsNullOrWhiteSpace(operation.Title) && message.Contains(operation.Title.ToLowerInvariant()))
-            {
-                return operation;
-            }
-
-            if (operation.AgentId switch
-            {
-                AgentIds.NoticeCreation when message.Contains("notice") || message.Contains("capital call") => true,
-                AgentIds.OnePager when message.Contains("one pager") || message.Contains("presentation") => true,
-                AgentIds.FundOnboarding when message.Contains("onboarding") || message.Contains("fund creation") => true,
-                _ => false
-            })
-            {
-                return operation;
-            }
-        }
-
-        return null;
-    }
-
-    private static ReviewTask? FindReferencedTask(
-        string message,
+    private static RoutingDecision NormalizeDecision(
+        RoutingDecision decision,
+        IReadOnlyCollection<AgentOperation> activeOperations,
         IReadOnlyCollection<ReviewTask> reviewTasks,
-        IReadOnlyCollection<AgentOperation> operations)
+        ISet<string> allowedAgentIds)
     {
-        foreach (var reviewTask in reviewTasks.Where(static task => task.Status == ReviewTaskStatus.Open))
+        return decision.Type switch
         {
-            if (message.Contains(reviewTask.Title.ToLowerInvariant()) || message.Contains(reviewTask.TaskType.ToLowerInvariant()))
-            {
-                return reviewTask;
-            }
+            RoutingDecisionType.ContinueOperation => NormalizeContinueOperation(decision, activeOperations),
+            RoutingDecisionType.RespondToReviewTask => NormalizeReviewTask(decision, activeOperations, reviewTasks),
+            RoutingDecisionType.AskStatus => NormalizeAskStatus(decision, activeOperations),
+            RoutingDecisionType.StartNewOperation => NormalizeStartNewOperation(decision, allowedAgentIds),
+            _ => new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "The request is ambiguous.")
+        };
+    }
 
-            var operation = operations.FirstOrDefault(candidate => candidate.Id == reviewTask.OperationId);
-            if (operation is not null && !string.IsNullOrWhiteSpace(operation.Title) && message.Contains(operation.Title.ToLowerInvariant()))
-            {
-                return reviewTask;
-            }
+    private static RoutingDecision NormalizeContinueOperation(
+        RoutingDecision decision,
+        IReadOnlyCollection<AgentOperation> activeOperations)
+    {
+        var operation = activeOperations.FirstOrDefault(candidate => candidate.Id == decision.OperationId);
+
+        if (operation is null && !string.IsNullOrWhiteSpace(decision.AgentId))
+        {
+            operation = activeOperations.FirstOrDefault(candidate => candidate.AgentId == decision.AgentId);
         }
 
-        return null;
+        return operation is null
+            ? new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "No active operation matched the continuation request.")
+            : new RoutingDecision(
+                RoutingDecisionType.ContinueOperation,
+                operation.AgentId,
+                operation.Id,
+                Explanation: decision.Explanation ?? "LLM classified the message as continuing an active operation.");
     }
+
+    private static RoutingDecision NormalizeReviewTask(
+        RoutingDecision decision,
+        IReadOnlyCollection<AgentOperation> activeOperations,
+        IReadOnlyCollection<ReviewTask> reviewTasks)
+    {
+        var reviewTask = reviewTasks.FirstOrDefault(task => task.Id == decision.ReviewTaskId && task.Status == ReviewTaskStatus.Open);
+
+        if (reviewTask is null && !string.IsNullOrWhiteSpace(decision.OperationId))
+        {
+            reviewTask = reviewTasks.FirstOrDefault(task => task.OperationId == decision.OperationId && task.Status == ReviewTaskStatus.Open);
+        }
+
+        if (reviewTask is null)
+        {
+            return new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "No open review task matched the request.");
+        }
+
+        var operation = activeOperations.FirstOrDefault(candidate => candidate.Id == reviewTask.OperationId);
+
+        return new RoutingDecision(
+            RoutingDecisionType.RespondToReviewTask,
+            operation?.AgentId,
+            reviewTask.OperationId,
+            reviewTask.Id,
+            decision.Explanation ?? "LLM classified the message as a review task decision.");
+    }
+
+    private static RoutingDecision NormalizeAskStatus(
+        RoutingDecision decision,
+        IReadOnlyCollection<AgentOperation> activeOperations)
+    {
+        if (string.IsNullOrWhiteSpace(decision.OperationId))
+        {
+            return new RoutingDecision(RoutingDecisionType.AskStatus, Explanation: decision.Explanation ?? "LLM classified the message as a status query.");
+        }
+
+        var operation = activeOperations.FirstOrDefault(candidate => candidate.Id == decision.OperationId);
+
+        return operation is null
+            ? new RoutingDecision(RoutingDecisionType.AskStatus, Explanation: decision.Explanation ?? "LLM classified the message as a status query.")
+            : new RoutingDecision(
+                RoutingDecisionType.AskStatus,
+                operation.AgentId,
+                operation.Id,
+                Explanation: decision.Explanation ?? "LLM classified the message as a specific status query.");
+    }
+
+    private static RoutingDecision NormalizeStartNewOperation(RoutingDecision decision, ISet<string> allowedAgentIds) =>
+        string.IsNullOrWhiteSpace(decision.AgentId) || !allowedAgentIds.Contains(decision.AgentId)
+            ? new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "LLM did not provide a valid agent id for new work.")
+            : new RoutingDecision(
+                RoutingDecisionType.StartNewOperation,
+                decision.AgentId,
+                Explanation: decision.Explanation ?? "LLM classified the message as a new request.");
 }

@@ -17,5 +17,4 @@ public sealed record AgentDefinition(
     string Id,
     string DisplayName,
     string Description,
-    AgentExecutionMode ExecutionMode,
-    IReadOnlyCollection<string> Keywords);
+    AgentExecutionMode ExecutionMode);
