@@ -34,7 +34,7 @@ public static class ServiceCollectionExtensions
     {
         services.Configure<MongoDbOptions>(configuration.GetSection(MongoDbOptions.SectionName));
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
-        services.Configure<RoutingLlmOptions>(configuration.GetSection(RoutingLlmOptions.SectionName));
+        services.Configure<LlmGatewayOptions>(configuration.GetSection(LlmGatewayOptions.SectionName));
 
         services.AddSingleton<IMongoClient>(serviceProvider =>
         {
@@ -42,7 +42,9 @@ public static class ServiceCollectionExtensions
             return new MongoClient(options.ConnectionString);
         });
 
-        services.AddHttpClient<IMessageIntentClassifier, OpenAiMessageIntentClassifier>();
+        services.AddSingleton<IStructuredLlmClient, MicrosoftExtensionsAiStructuredLlmClient>();
+        services.AddScoped<IMessageIntentClassifier, LlmMessageIntentClassifier>();
+        services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();
         services.AddSingleton<MongoCollections>();
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();

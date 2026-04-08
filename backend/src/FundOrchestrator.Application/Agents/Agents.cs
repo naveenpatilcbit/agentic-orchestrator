@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using FundOrchestrator.Application.Abstractions;
 using FundOrchestrator.Application.Support;
 using FundOrchestrator.Contracts.Messaging;
@@ -31,6 +30,20 @@ public sealed class AgentCatalog : IAgentCatalog
 
 public sealed class NoticeCreationAgent : IAgent
 {
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> InputFields =
+    [
+        new("fundName", "fund name", "Name of the private equity fund for which the notice draft should be created.", true, "ABC Growth Fund II"),
+        new("amount", "capital call amount", "Amount requested from LPs in the capital call notice.", true, "$5,000,000"),
+        new("noticeDate", "notice date", "Date that should appear on the notice draft.", false, "April 15")
+    ];
+
+    private readonly IAgentInputCompletionService _inputCompletionService;
+
+    public NoticeCreationAgent(IAgentInputCompletionService inputCompletionService)
+    {
+        _inputCompletionService = inputCompletionService;
+    }
+
     public AgentDefinition Definition { get; } = new(
         AgentIds.NoticeCreation,
         "Notice Creation Helper",
@@ -39,21 +52,23 @@ public sealed class NoticeCreationAgent : IAgent
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken) =>
-        ExecuteAsync(userMessage, operation);
+        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
 
     public Task<AgentExecutionResult> ContinueAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken) =>
-        ExecuteAsync(userMessage, operation);
+        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
 
     public Task<string> DescribeStatusAsync(
         AgentOperation operation,
@@ -66,49 +81,59 @@ public sealed class NoticeCreationAgent : IAgent
         return Task.FromResult(status);
     }
 
-    private static Task<AgentExecutionResult> ExecuteAsync(ConversationMessage userMessage, AgentOperation operation)
+    private async Task<AgentExecutionResult> ExecuteAsync(
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
+        ConversationMessage userMessage,
+        AgentOperation operation,
+        IReadOnlyCollection<FileAsset> attachments,
+        CancellationToken cancellationToken)
     {
-        var payload = JsonContent.Deserialize<Dictionary<string, string>>(operation.DataJson) ?? [];
+        var payload = await CompleteInputsAsync(
+            conversationHistory,
+            userMessage,
+            operation,
+            attachments,
+            cancellationToken);
 
-        MergeIfPresent(payload, "fundName", ExtractFundName(userMessage.Content));
-        MergeIfPresent(payload, "amount", ExtractAmount(userMessage.Content));
-        MergeIfPresent(payload, "noticeDate", ExtractDate(userMessage.Content));
+        var fundName = AgentInputStateSupport.GetValue(payload, "fundName");
+        var amount = AgentInputStateSupport.GetValue(payload, "amount");
+        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(InputFields, payload);
 
-        operation.Title = string.IsNullOrWhiteSpace(payload.GetValueOrDefault("fundName"))
+        operation.Title = string.IsNullOrWhiteSpace(fundName)
             ? "Capital Call Draft"
-            : $"Capital Call Draft for {payload["fundName"]}";
+            : $"Capital Call Draft for {fundName}";
 
-        if (!payload.ContainsKey("fundName") || !payload.ContainsKey("amount"))
+        if (missingRequiredFields.Count > 0)
         {
             operation.Status = AgentOperationStatus.ClarificationRequired;
             operation.CurrentStep = "CollectNoticeInputs";
-            operation.PendingClarification = "I need the fund name and amount to build the notice draft.";
+            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(InputFields, missingRequiredFields, "build the notice draft");
             operation.Summary = "Waiting for the missing notice inputs.";
-            operation.DataJson = JsonContent.Serialize(payload);
+            operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
-            return Task.FromResult(new AgentExecutionResult(
-                "I can handle the notice creation, but I still need the fund name and the capital call amount.",
+            return new AgentExecutionResult(
+                AgentInputStateSupport.BuildAssistantClarificationMessage(InputFields, missingRequiredFields, "notice creation"),
                 operation,
                 [new AgentAction
                 {
                     Type = AgentActionType.AskForMoreInfo,
                     Label = "Provide missing notice details",
-                    PayloadJson = JsonContent.Serialize(new { required = new[] { "fundName", "amount" } })
+                    PayloadJson = JsonContent.Serialize(new { required = missingRequiredFields })
                 }],
-                BuildAudit(operation, "NoticeClarificationRequested", payload)));
+                BuildAudit(operation, "NoticeClarificationRequested", payload));
         }
 
         operation.Status = AgentOperationStatus.Completed;
         operation.CurrentStep = "DraftReady";
         operation.PendingClarification = null;
         operation.Summary = "Created a reversible draft notice with prefilled fund, amount, and notice defaults.";
-        payload["draftRoute"] = $"/funds/{Slugify(payload["fundName"])}/capital-call-drafts/{operation.Id}";
+        payload["draftRoute"] = $"/funds/{AgentInputStateSupport.Slugify(fundName!)}/capital-call-drafts/{operation.Id}";
         payload["lpCount"] = "24";
         payload["defaultNoticeType"] = "Capital Call";
-        operation.DataJson = JsonContent.Serialize(payload);
+        operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
-        return Task.FromResult(new AgentExecutionResult(
-            $"I created a draft capital call for {payload["fundName"]} and prefilled the amount of {payload["amount"]}. You can open it, review the LP terms, and edit anything before sending.",
+        return new AgentExecutionResult(
+            $"I created a draft capital call for {fundName} and prefilled the amount of {amount}. You can open it, review the LP terms, and edit anything before sending.",
             operation,
             [
                 new AgentAction
@@ -119,28 +144,34 @@ public sealed class NoticeCreationAgent : IAgent
                     PayloadJson = JsonContent.Serialize(payload)
                 }
             ],
-            BuildAudit(operation, "NoticeDraftCreated", payload)));
+            BuildAudit(operation, "NoticeDraftCreated", payload));
     }
 
-    private static string? ExtractFundName(string input)
+    private async Task<Dictionary<string, string?>> CompleteInputsAsync(
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
+        ConversationMessage userMessage,
+        AgentOperation operation,
+        IReadOnlyCollection<FileAsset> attachments,
+        CancellationToken cancellationToken)
     {
-        var match = Regex.Match(input, @"fund\s+(?<value>[a-z0-9][a-z0-9\s\-]{1,40})", RegexOptions.IgnoreCase);
-        return match.Success ? ToTitleCase(match.Groups["value"].Value.Trim()) : null;
+        var currentValues = AgentInputStateSupport.LoadValues(operation);
+        var completion = await _inputCompletionService.CompleteAsync(
+            new AgentInputCompletionRequest(
+                Definition.Id,
+                Definition.DisplayName,
+                operation.CurrentStep,
+                operation.PendingClarification,
+                userMessage.Content,
+                AgentInputStateSupport.GetRelevantConversationHistory(conversationHistory, userMessage, operation),
+                attachments,
+                currentValues,
+                InputFields),
+            cancellationToken);
+
+        return new Dictionary<string, string?>(completion.Values, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string? ExtractAmount(string input)
-    {
-        var match = Regex.Match(input, @"(?<value>\$?\d[\d,]*(?:\.\d+)?)", RegexOptions.IgnoreCase);
-        return match.Success ? match.Groups["value"].Value.Trim() : null;
-    }
-
-    private static string? ExtractDate(string input)
-    {
-        var match = Regex.Match(input, @"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b", RegexOptions.IgnoreCase);
-        return match.Success ? match.Value.Trim() : null;
-    }
-
-    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, Dictionary<string, string> payload) =>
+    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, Dictionary<string, string?> payload) =>
     [
         new AuditEvent
         {
@@ -153,25 +184,23 @@ public sealed class NoticeCreationAgent : IAgent
             DataJson = JsonContent.Serialize(payload)
         }
     ];
-
-    private static void MergeIfPresent(IDictionary<string, string> payload, string key, string? value)
-    {
-        if (!string.IsNullOrWhiteSpace(value))
-        {
-            payload[key] = value;
-        }
-    }
-
-    private static string ToTitleCase(string input) =>
-        string.Join(" ", input.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Select(word => char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant()));
-
-    private static string Slugify(string value) =>
-        value.Trim().ToLowerInvariant().Replace(' ', '-');
 }
 
 public sealed class OnePagerAgent : IAgent
 {
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> InputFields =
+    [
+        new("companyName", "company name", "Portfolio company name that should be used in the one-pager.", true, "Atlas Industrial"),
+        new("formatName", "format name", "Preferred uploaded format or template name for the one-pager.", false, "Board Presentation Format")
+    ];
+
+    private readonly IAgentInputCompletionService _inputCompletionService;
+
+    public OnePagerAgent(IAgentInputCompletionService inputCompletionService)
+    {
+        _inputCompletionService = inputCompletionService;
+    }
+
     public AgentDefinition Definition { get; } = new(
         AgentIds.OnePager,
         "One Pager Generation Agent",
@@ -180,21 +209,23 @@ public sealed class OnePagerAgent : IAgent
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken) =>
-        ExecuteAsync(userMessage, operation, attachments);
+        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
 
     public Task<AgentExecutionResult> ContinueAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken) =>
-        ExecuteAsync(userMessage, operation, attachments);
+        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
 
     public Task<string> DescribeStatusAsync(
         AgentOperation operation,
@@ -202,51 +233,56 @@ public sealed class OnePagerAgent : IAgent
         CancellationToken cancellationToken) =>
         Task.FromResult(operation.Summary);
 
-    private static Task<AgentExecutionResult> ExecuteAsync(
+    private async Task<AgentExecutionResult> ExecuteAsync(
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
-        IReadOnlyCollection<FileAsset> attachments)
+        IReadOnlyCollection<FileAsset> attachments,
+        CancellationToken cancellationToken)
     {
-        var payload = JsonContent.Deserialize<Dictionary<string, string>>(operation.DataJson) ?? [];
-        MergeIfPresent(payload, "companyName", ExtractCompany(userMessage.Content));
-        MergeIfPresent(payload, "formatName", attachments.FirstOrDefault()?.FileName);
+        var payload = await CompleteInputsAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
+        AgentInputStateSupport.MergeIfPresent(payload, "formatName", attachments.FirstOrDefault()?.FileName);
 
-        operation.Title = string.IsNullOrWhiteSpace(payload.GetValueOrDefault("companyName"))
+        var companyName = AgentInputStateSupport.GetValue(payload, "companyName");
+        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(InputFields, payload);
+
+        operation.Title = string.IsNullOrWhiteSpace(companyName)
             ? "One Pager Draft"
-            : $"{payload["companyName"]} One Pager";
+            : $"{companyName} One Pager";
 
-        if (!payload.ContainsKey("companyName"))
+        if (missingRequiredFields.Count > 0)
         {
             operation.Status = AgentOperationStatus.ClarificationRequired;
             operation.CurrentStep = "CollectCompany";
-            operation.PendingClarification = "Tell me which portfolio company should be used for the one-pager.";
+            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(InputFields, missingRequiredFields, "generate the one-pager");
             operation.Summary = "Waiting for the target company.";
-            operation.DataJson = JsonContent.Serialize(payload);
+            operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
-            return Task.FromResult(new AgentExecutionResult(
-                "I can generate the one-pager, but I still need the company name.",
+            return new AgentExecutionResult(
+                AgentInputStateSupport.BuildAssistantClarificationMessage(InputFields, missingRequiredFields, "one-pager generation"),
                 operation,
                 [new AgentAction
                 {
                     Type = AgentActionType.AskForMoreInfo,
-                    Label = "Provide company name"
+                    Label = "Provide one-pager inputs",
+                    PayloadJson = JsonContent.Serialize(new { required = missingRequiredFields })
                 }],
-                BuildAudit(operation, "OnePagerClarificationRequested", payload)));
+                BuildAudit(operation, "OnePagerClarificationRequested", payload));
         }
 
         payload["templateName"] = payload.GetValueOrDefault("formatName", "Executive Snapshot Template");
         payload["artifactRoute"] = $"/artifacts/one-pager/{operation.Id}";
         payload["generatedAt"] = DateTimeOffset.UtcNow.ToString("u");
-        payload["teaser"] = $"{payload["companyName"]} revenue grew 18% YoY with stable margin expansion in the last reviewed quarter.";
+        payload["teaser"] = $"{companyName} revenue grew 18% YoY with stable margin expansion in the last reviewed quarter.";
 
         operation.Status = AgentOperationStatus.Completed;
         operation.CurrentStep = "ArtifactReady";
         operation.PendingClarification = null;
         operation.Summary = "Generated a draft one-pager using internal operating and ownership data.";
-        operation.DataJson = JsonContent.Serialize(payload);
+        operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
-        return Task.FromResult(new AgentExecutionResult(
-            $"I generated a draft one-pager for {payload["companyName"]} using {payload["templateName"]}. You can open it, edit it, and export when you are ready.",
+        return new AgentExecutionResult(
+            $"I generated a draft one-pager for {companyName} using {payload["templateName"]}. You can open it, edit it, and export when you are ready.",
             operation,
             [
                 new AgentAction
@@ -257,22 +293,34 @@ public sealed class OnePagerAgent : IAgent
                     PayloadJson = JsonContent.Serialize(payload)
                 }
             ],
-            BuildAudit(operation, "OnePagerGenerated", payload)));
+            BuildAudit(operation, "OnePagerGenerated", payload));
     }
 
-    private static string? ExtractCompany(string input)
+    private async Task<Dictionary<string, string?>> CompleteInputsAsync(
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
+        ConversationMessage userMessage,
+        AgentOperation operation,
+        IReadOnlyCollection<FileAsset> attachments,
+        CancellationToken cancellationToken)
     {
-        var explicitMatch = Regex.Match(input, @"company\s+(?<value>[a-z0-9][a-z0-9\s\-]{1,40})", RegexOptions.IgnoreCase);
-        if (explicitMatch.Success)
-        {
-            return ToTitleCase(explicitMatch.Groups["value"].Value.Trim());
-        }
+        var currentValues = AgentInputStateSupport.LoadValues(operation);
+        var completion = await _inputCompletionService.CompleteAsync(
+            new AgentInputCompletionRequest(
+                Definition.Id,
+                Definition.DisplayName,
+                operation.CurrentStep,
+                operation.PendingClarification,
+                userMessage.Content,
+                AgentInputStateSupport.GetRelevantConversationHistory(conversationHistory, userMessage, operation),
+                attachments,
+                currentValues,
+                InputFields),
+            cancellationToken);
 
-        var fallback = Regex.Match(input, @"for\s+(?<value>[a-z0-9][a-z0-9\s\-]{1,40})", RegexOptions.IgnoreCase);
-        return fallback.Success ? ToTitleCase(fallback.Groups["value"].Value.Trim()) : null;
+        return new Dictionary<string, string?>(completion.Values, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, Dictionary<string, string> payload) =>
+    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, Dictionary<string, string?> payload) =>
     [
         new AuditEvent
         {
@@ -285,18 +333,6 @@ public sealed class OnePagerAgent : IAgent
             DataJson = JsonContent.Serialize(payload)
         }
     ];
-
-    private static void MergeIfPresent(IDictionary<string, string> payload, string key, string? value)
-    {
-        if (!string.IsNullOrWhiteSpace(value))
-        {
-            payload[key] = value;
-        }
-    }
-
-    private static string ToTitleCase(string input) =>
-        string.Join(" ", input.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Select(word => char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant()));
 }
 
 public sealed class FundOnboardingAgent : IAgent
@@ -316,6 +352,7 @@ public sealed class FundOnboardingAgent : IAgent
 
     public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
@@ -380,6 +417,7 @@ public sealed class FundOnboardingAgent : IAgent
 
     public Task<AgentExecutionResult> ContinueAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
@@ -388,7 +426,7 @@ public sealed class FundOnboardingAgent : IAgent
     {
         if (operation.Status == AgentOperationStatus.ClarificationRequired && attachments.Count > 0)
         {
-            return StartAsync(conversation, userMessage, operation, attachments, context, cancellationToken);
+            return StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
         }
 
         return Task.FromResult(new AgentExecutionResult(
@@ -436,4 +474,89 @@ public sealed class FundOnboardingAgent : IAgent
             DataJson = JsonContent.Serialize(payload)
         }
     ];
+}
+
+internal static class AgentInputStateSupport
+{
+    public static Dictionary<string, string?> LoadValues(AgentOperation operation)
+    {
+        var payload = JsonContent.Deserialize<Dictionary<string, string?>>(operation.DataJson);
+        return payload is null
+            ? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string?>(payload, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public static string SerializeValues(IDictionary<string, string?> payload)
+    {
+        var compact = payload
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Value))
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        return JsonContent.Serialize(compact);
+    }
+
+    public static IReadOnlyCollection<string> GetMissingRequiredFieldNames(
+        IReadOnlyCollection<AgentInputFieldDefinition> fieldDefinitions,
+        IReadOnlyDictionary<string, string?> payload) =>
+        fieldDefinitions
+            .Where(static field => field.Required)
+            .Where(field => !payload.TryGetValue(field.Name, out var value) || string.IsNullOrWhiteSpace(value))
+            .Select(field => field.Name)
+            .ToArray();
+
+    public static string BuildPendingClarification(
+        IReadOnlyCollection<AgentInputFieldDefinition> fieldDefinitions,
+        IReadOnlyCollection<string> missingFieldNames,
+        string actionDescription) =>
+        $"I still need {FormatFieldLabels(fieldDefinitions, missingFieldNames)} to {actionDescription}.";
+
+    public static string BuildAssistantClarificationMessage(
+        IReadOnlyCollection<AgentInputFieldDefinition> fieldDefinitions,
+        IReadOnlyCollection<string> missingFieldNames,
+        string capabilityDescription) =>
+        $"I can handle {capabilityDescription}, but I still need {FormatFieldLabels(fieldDefinitions, missingFieldNames)}.";
+
+    public static IReadOnlyCollection<ConversationMessage> GetRelevantConversationHistory(
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
+        ConversationMessage userMessage,
+        AgentOperation operation) =>
+        conversationHistory
+            .Where(message => message.OperationId == operation.Id || message.Id == userMessage.Id)
+            .OrderByDescending(message => message.CreatedAtUtc)
+            .Take(8)
+            .OrderBy(message => message.CreatedAtUtc)
+            .ToArray();
+
+    public static string? GetValue(IReadOnlyDictionary<string, string?> payload, string key) =>
+        payload.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : null;
+
+    public static void MergeIfPresent(IDictionary<string, string?> payload, string key, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            payload[key] = value.Trim();
+        }
+    }
+
+    public static string Slugify(string value) =>
+        value.Trim().ToLowerInvariant().Replace(' ', '-');
+
+    private static string FormatFieldLabels(
+        IReadOnlyCollection<AgentInputFieldDefinition> fieldDefinitions,
+        IReadOnlyCollection<string> missingFieldNames)
+    {
+        var labels = missingFieldNames
+            .Select(name => fieldDefinitions.FirstOrDefault(field => field.Name.Equals(name, StringComparison.OrdinalIgnoreCase))?.Label ?? name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return labels.Length switch
+        {
+            0 => "a little more detail",
+            1 => $"the {labels[0]}",
+            2 => $"the {labels[0]} and {labels[1]}",
+            _ => $"these details: {string.Join(", ", labels[..^1])}, and {labels[^1]}"
+        };
+    }
 }

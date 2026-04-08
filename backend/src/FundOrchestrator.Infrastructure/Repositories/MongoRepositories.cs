@@ -47,6 +47,13 @@ public sealed class ConversationMessageRepository : IConversationMessageReposito
     public Task AddAsync(ConversationMessage message, CancellationToken cancellationToken) =>
         _collections.Messages.InsertOneAsync(message, cancellationToken: cancellationToken);
 
+    public Task UpsertAsync(ConversationMessage message, CancellationToken cancellationToken) =>
+        _collections.Messages.ReplaceOneAsync(
+            item => item.Id == message.Id && item.TenantId == message.TenantId,
+            message,
+            new ReplaceOptions { IsUpsert = true },
+            cancellationToken);
+
     public async Task<IReadOnlyCollection<ConversationMessage>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken) =>
         await _collections.Messages.Find(item => item.ConversationId == conversationId && item.TenantId == tenantId)
             .SortBy(item => item.CreatedAtUtc)

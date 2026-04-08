@@ -23,6 +23,7 @@ This repo contains a working sample implementation of that architecture using:
 - `MongoDB`
 - `NServiceBus + RabbitMQ + MongoDB saga persistence`
 - `React + Vite`
+- `Microsoft.Extensions.AI` as the application-facing LLM abstraction
 
 ## 2. Design Principles
 
@@ -34,6 +35,7 @@ This repo contains a working sample implementation of that architecture using:
 - Long-running workflows must survive delays, polling, retries, and human review.
 - Tenant isolation is enforced in storage and APIs, not delegated to prompts.
 - Auditability is built into every stage: message, routing, agent result, review, and workflow continuation.
+- LLM usage is provider-neutral at the application boundary; provider SDKs stay isolated in infrastructure.
 
 ## 3. Scope
 
@@ -59,7 +61,7 @@ This repo contains a working sample implementation of that architecture using:
 
 - Real authentication and authorization
 - Real OCR/extraction integration
-- Real LLM provider integration
+- Production-grade multi-provider LLM operations such as evaluation, fallback routing, prompt registry, and centralized caching
 - Real notification channels beyond polling/chat updates
 - Production-grade deployment hardening
 
@@ -128,11 +130,17 @@ flowchart LR
     API --> CHAT["Chat Orchestrator Service"]
     API --> REV["Review Task Service"]
     API --> FILES["File Upload Service"]
+    API --> LLM["LLM Interaction Layer (Microsoft.Extensions.AI)"]
 
     ROUTER --> AGENTS["Agent Catalog"]
     AGENTS --> NOTICE["Notice Creation Agent"]
     AGENTS --> ONEPAGER["One Pager Agent"]
     AGENTS --> ONBOARD["Fund Onboarding Agent"]
+    ROUTER --> LLM
+    NOTICE --> LLM
+    ONEPAGER --> LLM
+    LLM --> PROVIDER["Provider Adapter (swappable)"]
+    PROVIDER --> MODEL["Model Provider Endpoint"]
 
     ONBOARD --> NSB["NServiceBus Command Dispatcher"]
     NSB --> SAGA["Onboarding Saga Worker"]
@@ -176,6 +184,8 @@ Determines whether a message:
 - starts new work
 - is ambiguous and needs clarification
 
+The recommended implementation uses an LLM-backed structured classifier behind a provider-neutral abstraction. The routing service should depend on `Microsoft.Extensions.AI` interfaces or a thin application wrapper on top of them, not on a provider SDK directly.
+
 ### Agent Catalog
 
 Registers supported capabilities and provides agent lookup/classification.
@@ -185,7 +195,36 @@ Registers supported capabilities and provides agent lookup/classification.
 - `NoticeCreationAgent`
 - `OnePagerAgent`
 
-These use deterministic logic in the sample, but they fit the same contract as LLM-backed capabilities.
+These should use a shared input-completion layer:
+
+- required fields are defined in code by the agent/workflow contract
+- an LLM extracts candidate values from the latest user message plus small operation-scoped history
+- validation of required fields remains deterministic in code
+- execution proceeds only after required fields are present
+
+This keeps the system safe while still making clarification loops natural for users.
+
+### LLM Interaction Layer
+
+This layer is responsible for all model calls that support routing and agent slot-filling.
+
+- application code depends on `Microsoft.Extensions.AI` abstractions such as `IChatClient`
+- infrastructure provides the concrete adapter package
+- the current default adapter can be `Microsoft.Extensions.AI.OpenAI`
+- the underlying provider SDK such as `OpenAI` should stay hidden behind the infrastructure adapter
+- a future swap to Azure OpenAI, Anthropic, Gemini, or another OpenAI-compatible endpoint should require only infrastructure changes
+- the application should expose narrow use-case-specific services such as:
+  - `IMessageIntentClassifier`
+  - `IAgentInputCompletionService`
+  - optional future `IStructuredLlmClient`
+
+This avoids vendor lock-in while keeping the business code focused on orchestration and validation.
+
+Recommended package strategy:
+
+- application-facing abstraction: `Microsoft.Extensions.AI`
+- current adapter: `Microsoft.Extensions.AI.OpenAI`
+- current provider SDK hidden in infrastructure: `OpenAI`
 
 ### Saga Workflow
 
@@ -229,9 +268,28 @@ Handles:
 
 | Agent | Mode | Runtime shape |
 | --- | --- | --- |
-| Notice Creation Helper | `InlineFunction` | parse request, gather missing inputs, create draft action |
-| One Pager Generation Agent | `InlineFunction` | parse target company/template, generate artifact action |
+| Notice Creation Helper | `InlineFunction` | run LLM-assisted slot filling, validate required inputs, create draft action |
+| One Pager Generation Agent | `InlineFunction` | run LLM-assisted slot filling, validate required inputs, generate artifact action |
 | Fund Onboarding Helper | `SagaWorkflow` | command dispatch, persisted saga state, review gates |
+
+### LLM-assisted request completion
+
+For inline and hybrid agents, request completion should follow this pattern:
+
+1. Load the current operation state
+2. Read the agent-defined field schema and required inputs
+3. Send the latest user message plus a small operation-scoped history window to the LLM interaction layer
+4. Merge any extracted values into the operation payload
+5. Determine missing required fields using deterministic validation
+6. Either ask for clarification or continue execution
+
+Important rule:
+
+- the LLM extracts values
+- the code decides what fields are mandatory
+- the code decides whether execution is allowed
+
+This is the core mechanism that keeps `ContinueAsync` safe and predictable.
 
 ### Why not “everything is just a kernel function”
 
@@ -351,6 +409,7 @@ sequenceDiagram
     participant API as "Orchestrator API"
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Message Routing Service"
+    participant LLM as "LLM Interaction Layer"
     participant AGENT as "Selected Agent"
     participant DB as "MongoDB"
 
@@ -359,6 +418,8 @@ sequenceDiagram
     API->>CHAT: HandleMessageAsync
     CHAT->>DB: Store user message
     CHAT->>ROUTER: Decide(message, conversation, operations, reviewTasks)
+    ROUTER->>LLM: Structured intent classification
+    LLM-->>ROUTER: Routing decision JSON
     ROUTER-->>CHAT: Routing decision
     CHAT->>AGENT: Start or continue operation
     AGENT-->>CHAT: AgentExecutionResult
@@ -380,6 +441,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "Notice Creation Agent"
+    participant LLM as "LLM Interaction Layer"
     participant DB as "MongoDB"
 
     U->>UI: "Create a capital call notice for Apex Fund I for $3,500,000"
@@ -389,7 +451,9 @@ sequenceDiagram
     ROUTER-->>CHAT: Start notice operation
     CHAT->>DB: Create operation
     CHAT->>AGENT: StartAsync
-    AGENT->>AGENT: Extract fund name, amount, optional date
+    AGENT->>LLM: Extract structured fields from latest message + operation history
+    LLM-->>AGENT: fundName, amount, optional noticeDate
+    AGENT->>AGENT: Validate required inputs in code
 
     alt Missing data
         AGENT-->>CHAT: ClarificationRequired + AskForMoreInfo
@@ -488,6 +552,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "One Pager Agent"
+    participant LLM as "LLM Interaction Layer"
     participant DB as "MongoDB"
 
     U->>UI: Upload format and ask for one-pager
@@ -499,7 +564,9 @@ sequenceDiagram
     CHAT->>ROUTER: Classify new work
     ROUTER-->>CHAT: Start one-pager operation
     CHAT->>AGENT: StartAsync
-    AGENT->>AGENT: Extract company and template
+    AGENT->>LLM: Extract company and template from prompt + scoped history
+    LLM-->>AGENT: structured candidate values
+    AGENT->>AGENT: Validate required inputs in code
 
     alt Missing company
         AGENT-->>CHAT: ClarificationRequired
@@ -572,6 +639,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "Notice or One Pager Agent"
+    participant LLM as "LLM Interaction Layer"
     participant DB as "MongoDB"
 
     U->>UI: Initial request with missing fields
@@ -580,6 +648,8 @@ sequenceDiagram
     CHAT->>ROUTER: Decide
     ROUTER-->>CHAT: StartNewOperation
     CHAT->>AGENT: StartAsync
+    AGENT->>LLM: Extract available field values
+    LLM-->>AGENT: partial field set
     AGENT-->>CHAT: ClarificationRequired
     CHAT->>DB: Save operation state
     CHAT-->>UI: Ask for missing fields
@@ -590,6 +660,8 @@ sequenceDiagram
     CHAT->>ROUTER: Decide
     ROUTER-->>CHAT: ContinueOperation
     CHAT->>AGENT: ContinueAsync
+    AGENT->>LLM: Extract newly provided fields from follow-up
+    LLM-->>AGENT: updated field values
     AGENT-->>CHAT: Completed with action
     CHAT->>DB: Update operation and append assistant reply
     CHAT-->>UI: Show final draft or artifact action
@@ -780,6 +852,10 @@ Recovery should happen from persisted operation and review state, not by replayi
 - orchestration: `backend/src/FundOrchestrator.Application/Conversations/ChatOrchestratorService.cs`
 - review continuation: `backend/src/FundOrchestrator.Application/Reviews/ReviewTaskService.cs`
 - agents: `backend/src/FundOrchestrator.Application/Agents/Agents.cs`
+- application LLM abstractions: `backend/src/FundOrchestrator.Application/Abstractions/StructuredLlm.cs`
+- provider-neutral LLM gateway: `backend/src/FundOrchestrator.Infrastructure/AI/MicrosoftExtensionsAiStructuredLlmClient.cs`
+- routing classifier: `backend/src/FundOrchestrator.Infrastructure/AI/LlmMessageIntentClassifier.cs`
+- input completion: `backend/src/FundOrchestrator.Infrastructure/AI/LlmAgentInputCompletionService.cs`
 - saga: `backend/src/FundOrchestrator.Worker/Sagas/OnboardingSaga.cs`
 - contracts: `backend/src/FundOrchestrator.Contracts`
 - repositories: `backend/src/FundOrchestrator.Infrastructure/Repositories/MongoRepositories.cs`
@@ -803,7 +879,7 @@ Recovery should happen from persisted operation and review state, not by replayi
 
 ### Known simplifications in this sample
 
-- routing is rule-based, not model-based
+- the application is provider-neutral, but the infrastructure currently ships with one OpenAI-compatible adapter
 - onboarding uses dummy timeouts instead of a real external OCR/extraction service
 - file storage is local, not object storage
 - polling is used instead of SignalR
@@ -813,8 +889,9 @@ Recovery should happen from persisted operation and review state, not by replayi
 
 - add real policy-based authorization
 - replace dummy onboarding timeouts with external service callbacks or polling adapters
-- add model gateway and agent-specific prompts where reasoning is needed
+- centralize all model access behind `Microsoft.Extensions.AI` and a small internal LLM gateway
+- add agent-specific prompt/version tracking for routing and input-completion profiles
 - move file storage to object storage
 - add SignalR for real-time status updates
 - introduce agent registry configuration so new agents can be enabled per tenant/environment
-- add prompt/version tracking for LLM-backed agents
+- add provider fallback, evals, and cache/telemetry around the LLM gateway

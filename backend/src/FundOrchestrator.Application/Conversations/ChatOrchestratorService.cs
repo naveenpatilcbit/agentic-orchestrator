@@ -183,7 +183,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         };
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
-        var result = await agent.StartAsync(conversation, userMessage, operation, attachments, context, cancellationToken);
+        var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
+        var result = await agent.StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
         await PersistAgentResultAsync(conversation, result, context, cancellationToken);
     }
 
@@ -203,7 +204,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         }
 
         var agent = _agentCatalog.Resolve(operation.AgentId);
-        var result = await agent.ContinueAsync(conversation, userMessage, operation, attachments, context, cancellationToken);
+        var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
+        var result = await agent.ContinueAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
         await PersistAgentResultAsync(conversation, result, context, cancellationToken);
     }
 
@@ -343,6 +345,18 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         }
 
         return await _fileAssetRepository.ListByIdsAsync(attachmentIds, context.TenantId, cancellationToken);
+    }
+
+    private async Task<IReadOnlyCollection<ConversationMessage>> AttachOperationToUserMessageAndLoadHistoryAsync(
+        ConversationMessage userMessage,
+        string operationId,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        userMessage.OperationId = operationId;
+        await _conversationMessageRepository.UpsertAsync(userMessage, cancellationToken);
+
+        return await _conversationMessageRepository.ListByConversationAsync(userMessage.ConversationId, context.TenantId, cancellationToken);
     }
 
     private async Task AddAssistantMessageAsync(

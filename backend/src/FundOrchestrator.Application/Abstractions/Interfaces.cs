@@ -20,6 +20,7 @@ public interface IConversationRepository
 public interface IConversationMessageRepository
 {
     Task AddAsync(ConversationMessage message, CancellationToken cancellationToken);
+    Task UpsertAsync(ConversationMessage message, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<ConversationMessage>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
 }
 
@@ -90,26 +91,53 @@ public interface IMessageIntentClassifier
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Contract implemented by every agent capability in the platform.
+/// The chat orchestrator chooses which method to invoke based on the routing decision for the incoming message.
+/// </summary>
 public interface IAgent
 {
+    /// <summary>
+    /// Static metadata used by the catalog, router, and UI to identify the agent and its execution mode.
+    /// </summary>
     AgentDefinition Definition { get; }
 
+    /// <summary>
+    /// Invoked when the router decides the incoming message should start a brand new operation for this agent.
+    /// This is the first execution entry point after the orchestrator creates and persists a fresh <see cref="AgentOperation" />.
+    /// Typical examples are a new notice draft request, a new onboarding submission, or a new one-pager request.
+    /// <paramref name="conversationHistory" /> contains the recent operation-scoped messages available at the moment execution starts.
+    /// </summary>
     Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Invoked when the router attaches the incoming message to an existing operation for this agent.
+    /// Use this path for follow-up messages such as clarification answers, "continue" instructions, or additional input
+    /// that should advance work already in progress instead of creating a new operation.
+    /// <paramref name="conversationHistory" /> contains the recent messages already associated with the same operation so the
+    /// implementation can extract missing fields without treating the full chat thread as workflow state.
+    /// </summary>
     Task<AgentExecutionResult> ContinueAsync(
         ConversationThread conversation,
+        IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Invoked when the user asks for the status of an operation and the orchestrator needs an agent-specific status summary.
+    /// The implementation should translate the stored operation state and any related review tasks into a concise,
+    /// user-facing status message without mutating workflow state.
+    /// </summary>
     Task<string> DescribeStatusAsync(
         AgentOperation operation,
         IReadOnlyCollection<ReviewTask> relatedTasks,
