@@ -8,9 +8,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.14" />
-    <PackageReference Include="NServiceBus" Version="9.2.7" />
-    <PackageReference Include="NServiceBus.Extensions.Hosting" Version="3.0.0" />
-    <PackageReference Include="NServiceBus.RabbitMQ" Version="10.1.0" />
   </ItemGroup>
 
   <ItemGroup>

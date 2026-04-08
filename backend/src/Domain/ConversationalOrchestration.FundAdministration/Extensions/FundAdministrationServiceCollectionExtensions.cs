@@ -12,6 +12,7 @@ public static class FundAdministrationServiceCollectionExtensions
         services.AddScoped<IAgent, NoticeCreationAgent>();
         services.AddScoped<IAgent, FundOnboardingAgent>();
         services.AddScoped<IAgent, OnePagerAgent>();
+        services.AddSingleton<IWorkflowDefinition, FundOnboardingWorkflowDefinition>();
         services.AddScoped<IFundAdministrationWorkflowDispatcher, FundAdministrationWorkflowDispatcher>();
         services.AddScoped<IReviewContinuationHandler, FundOnboardingReviewContinuationHandler>();
         return services;

@@ -4,7 +4,7 @@ Sample multi-agent fund administration orchestration app with:
 
 - `.NET 9` clean-architecture backend
 - `MongoDB` for conversations, operations, reviews, audit, and files
-- `NServiceBus + RabbitMQ + MongoDB storage` for the onboarding saga
+- `Microsoft Agent Framework Workflows` with Mongo-backed checkpoints for long-running orchestration
 - `React + Vite` chat UI
 - polling-based conversation refresh
 
@@ -27,7 +27,7 @@ cd backend
 $HOME/.dotnet/dotnet run --project src/Hosts/ConversationalOrchestration.Api
 ```
 
-Run the workflow worker:
+Run the optional worker host:
 
 ```bash
 cd backend
@@ -50,12 +50,6 @@ Backend URL:
 
 - `http://localhost:8080`
 
-RabbitMQ management UI:
-
-- `http://localhost:15672`
-- username: `guest`
-- password: `guest`
-
 MongoDB exposed port:
 
 - `mongodb://localhost:27018`
@@ -72,6 +66,6 @@ MongoDB exposed port:
 
 - one conversation can contain many operations
 - routing can continue an existing operation, answer a review task, ask for status, or start new work
-- long-running onboarding is modeled as a saga
+- long-running onboarding is modeled as a resumable workflow with Mongo checkpoints
 - financial or record-creating steps end in review gates or drafts
 - chat is the user-facing projection, not the workflow source of truth

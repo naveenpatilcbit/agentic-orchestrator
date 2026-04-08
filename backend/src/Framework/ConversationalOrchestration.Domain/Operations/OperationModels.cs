@@ -46,6 +46,8 @@ public sealed class AgentOperation
     public string CreatedByUserId { get; set; } = string.Empty;
     public string? PendingClarification { get; set; }
     public string? ActiveReviewTaskId { get; set; }
+    public string? WorkflowInstanceId { get; set; }
+    public string? LatestCheckpointId { get; set; }
     public string? DataJson { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;

@@ -16,6 +16,7 @@ public sealed class ReviewTask
     public string OperationId { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string TaskType { get; set; } = string.Empty;
+    public string? WorkflowPendingRequestId { get; set; }
     public string ProposedPayloadJson { get; set; } = string.Empty;
     public string? FinalPayloadJson { get; set; }
     public string? Notes { get; set; }

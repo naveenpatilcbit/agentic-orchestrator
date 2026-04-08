@@ -8,6 +8,7 @@ using ConversationalOrchestration.Infrastructure.Configuration;
 using ConversationalOrchestration.Infrastructure.Data;
 using ConversationalOrchestration.Infrastructure.Files;
 using ConversationalOrchestration.Infrastructure.Repositories;
+using ConversationalOrchestration.Infrastructure.Workflows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
@@ -45,9 +46,14 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();
         services.AddScoped<IAgentOperationRepository, AgentOperationRepository>();
         services.AddScoped<IReviewTaskRepository, ReviewTaskRepository>();
+        services.AddScoped<IWorkflowInstanceRepository, WorkflowInstanceRepository>();
+        services.AddScoped<IWorkflowPendingRequestRepository, WorkflowPendingRequestRepository>();
         services.AddScoped<IAuditEventRepository, AuditEventRepository>();
         services.AddScoped<IFileAssetRepository, FileAssetRepository>();
         services.AddScoped<IFileStorageService, LocalFileStorageService>();
+        services.AddSingleton<MongoJsonCheckpointStore>();
+        services.AddScoped<IWorkflowRegistry, WorkflowRegistry>();
+        services.AddScoped<IWorkflowRuntimeService, WorkflowRuntimeService>();
 
         services.AddConversationalOrchestrationCore();
         return services;

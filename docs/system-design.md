@@ -21,7 +21,8 @@ This repo contains a working sample implementation of that architecture using:
 
 - `.NET 9`
 - `MongoDB`
-- `NServiceBus + RabbitMQ + MongoDB saga persistence`
+- `Microsoft Agent Framework Workflows`
+- `MongoDB-backed workflow checkpoints and pending-request state`
 - `React + Vite`
 - `Microsoft.Extensions.AI` as the application-facing LLM abstraction
 
@@ -44,7 +45,7 @@ This repo contains a working sample implementation of that architecture using:
 - Chat-driven request intake
 - Agent routing
 - Inline agent execution
-- Saga-backed onboarding workflow
+- workflow-backed onboarding orchestration with resumable checkpoints
 - Human review queue
 - Conversation history
 - Conversation thread projection for workflow updates
@@ -142,16 +143,14 @@ flowchart LR
     LLM --> PROVIDER["Provider Adapter (swappable)"]
     PROVIDER --> MODEL["Model Provider Endpoint"]
 
-    ONBOARD --> NSB["NServiceBus Command Dispatcher"]
-    NSB --> SAGA["Onboarding Saga Worker"]
+    ONBOARD --> WFRT["Workflow Runtime Service"]
+    WFRT --> WFLOW["Fund Onboarding Workflow"]
+    WFRT --> WFCHECK["Mongo Checkpoint Store"]
 
     CHAT --> MONGO[("MongoDB")]
     REV --> MONGO
-    SAGA --> MONGO
+    WFRT --> MONGO
     FILES --> DISK["Local File Storage"]
-
-    API --> RABBIT["RabbitMQ"]
-    SAGA --> RABBIT
 ```
 
 ## 6. Component Responsibilities
@@ -226,17 +225,16 @@ Recommended package strategy:
 - current adapter: `Microsoft.Extensions.AI.OpenAI`
 - current provider SDK hidden in infrastructure: `OpenAI`
 
-### Saga Workflow
+### Workflow Runtime
 
-`OnboardingSaga` manages:
+`FundOnboardingWorkflow` manages:
 
 - onboarding start
-- wait for classification result
 - create classification review
 - continue after approval
-- wait for extraction result
 - create extraction review
 - complete with draft creation
+- resume from Mongo-backed checkpoints after each review
 
 ### MongoDB
 
@@ -248,21 +246,16 @@ Stores:
 - review tasks
 - audit events
 - file metadata
-
-### RabbitMQ + NServiceBus
-
-Handles:
-
-- start workflow command
-- review continuation command
-- saga state progression
+- workflow instances
+- workflow pending requests
+- workflow checkpoints
 
 ## 7. Execution Model
 
 ### Agent execution modes
 
 - `InlineFunction`
-- `SagaWorkflow`
+- `Workflow`
 
 ### Current agent mapping
 
@@ -270,7 +263,7 @@ Handles:
 | --- | --- | --- |
 | Notice Creation Helper | `InlineFunction` | run LLM-assisted slot filling, validate required inputs, create draft action |
 | One Pager Generation Agent | `InlineFunction` | run LLM-assisted slot filling, validate required inputs, generate artifact action |
-| Fund Onboarding Helper | `SagaWorkflow` | command dispatch, persisted saga state, review gates |
+| Fund Onboarding Helper | `Workflow` | workflow runtime, Mongo checkpoints, review gates |
 
 ### LLM-assisted request completion
 
@@ -337,7 +330,7 @@ The table below captures the expected behavior for the most important runtime si
 | User sends message that fills missing fields | Continue the clarification-required operation | same operation updated, pending clarification cleared |
 | User asks for notice creation with enough details | Complete inline and return draft action | operation completed, draft route stored |
 | User asks for notice creation with missing details | Ask for more information | operation set to `ClarificationRequired` |
-| User uploads docs and asks to create fund | Start onboarding workflow | operation created, workflow command published |
+| User uploads docs and asks to create fund | Start onboarding workflow | operation created, workflow instance/checkpoint state persisted |
 | Workflow reaches classification checkpoint | Create review task and system chat update | task stored, operation set to `WaitingForHumanReview` |
 | Reviewer approves classification | Resume workflow and request extraction stage | review task approved, operation resumed, continuation command published |
 | Workflow reaches extraction checkpoint | Create extraction review task | task stored, operation set to `WaitingForHumanReview` |
@@ -466,7 +459,7 @@ sequenceDiagram
     end
 ```
 
-### 10.3 Fund Onboarding Helper with saga
+### 10.3 Fund Onboarding Helper with workflow checkpoints
 
 ```mermaid
 sequenceDiagram
@@ -476,9 +469,8 @@ sequenceDiagram
     participant API as "Orchestrator API"
     participant CHAT as "Chat Orchestrator"
     participant AGENT as "Fund Onboarding Agent"
-    participant NSB as "NServiceBus Dispatcher"
-    participant MQ as "RabbitMQ"
-    participant SAGA as "Onboarding Saga"
+    participant WF as "Workflow Runtime"
+    participant CP as "Mongo Checkpoint Store"
     participant DB as "MongoDB"
 
     U->>UI: Upload docs and ask to create fund
@@ -488,17 +480,14 @@ sequenceDiagram
     UI->>API: POST message
     API->>CHAT: HandleMessageAsync
     CHAT->>AGENT: StartAsync
-    AGENT->>DB: Create operation with WaitingForExternalSystem
-    AGENT->>NSB: StartOnboardingWorkflowCommand
-    NSB->>MQ: Publish command
+    AGENT->>DB: Create operation
+    AGENT->>WF: StartAsync(start input)
+    WF->>CP: Save workflow checkpoint
+    WF->>DB: Persist workflow instance + pending request
+    WF->>DB: Create classification review task
+    WF->>DB: Update operation to WaitingForHumanReview
+    WF->>DB: Add system chat update
     CHAT-->>UI: Operation started
-
-    MQ->>SAGA: StartOnboardingWorkflowCommand
-    SAGA->>DB: Write audit event
-    SAGA->>SAGA: Request classification timeout
-    SAGA->>DB: Create classification review task
-    SAGA->>DB: Update operation to WaitingForHumanReview
-    SAGA->>DB: Add system chat update
     UI->>API: Poll conversation snapshot
     API->>DB: Load latest messages, tasks, operations
     API-->>UI: Classification review is ready
@@ -513,10 +502,9 @@ sequenceDiagram
     participant UI as "React UI"
     participant API as "Review API"
     participant REV as "Review Task Service"
+    participant WF as "Workflow Runtime"
+    participant CP as "Mongo Checkpoint Store"
     participant DB as "MongoDB"
-    participant NSB as "NServiceBus Dispatcher"
-    participant MQ as "RabbitMQ"
-    participant SAGA as "Onboarding Saga"
 
     U->>UI: Approve review task
     UI->>API: POST /api/reviews/{id}/decision
@@ -525,19 +513,19 @@ sequenceDiagram
     REV->>DB: Update operation to Running / ResumeRequested
     REV->>DB: Append system chat message
     REV->>DB: Append audit event
-    REV->>NSB: AdvanceOnboardingReviewCommand
-    NSB->>MQ: Publish command
-
-    MQ->>SAGA: AdvanceOnboardingReviewCommand
+    REV->>WF: ResumeAsync(response payload)
+    WF->>CP: Restore latest checkpoint
     alt Classification review approved
-        SAGA->>DB: Set operation WaitingForExternalSystem
-        SAGA->>DB: Add workflow chat update
-        SAGA->>SAGA: Request extraction timeout
+        WF->>CP: Save next checkpoint
+        WF->>DB: Create extraction review task
+        WF->>DB: Set operation WaitingForHumanReview
+        WF->>DB: Add workflow chat update
     else Extraction review approved
-        SAGA->>DB: Mark operation Completed
-        SAGA->>DB: Store draft route in operation data
-        SAGA->>DB: Add workflow chat update
-        SAGA->>DB: Append completion audit event
+        WF->>CP: Save completion checkpoint
+        WF->>DB: Mark operation Completed
+        WF->>DB: Store draft route in operation data
+        WF->>DB: Add workflow chat update
+        WF->>DB: Append completion audit event
     end
 ```
 
@@ -766,7 +754,7 @@ Chat is updated as a projection of backend state changes:
 - operation is created or updated
 - review is created
 - review is approved or rejected
-- saga advances
+- workflow runtime resumes from checkpoint
 - system appends a chat update
 
 This separation gives:
@@ -857,7 +845,9 @@ Recovery should happen from persisted operation and review state, not by replayi
 - routing classifier: `backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/LlmMessageIntentClassifier.cs`
 - input completion: `backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/LlmAgentInputCompletionService.cs`
 - fund-domain agents: `backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents`
-- fund onboarding saga: `backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/OnboardingSaga.cs`
+- workflow runtime: `backend/src/Framework/ConversationalOrchestration.Infrastructure/Workflows/WorkflowRuntime.cs`
+- Mongo checkpoint store: `backend/src/Framework/ConversationalOrchestration.Infrastructure/Workflows/MongoJsonCheckpointStore.cs`
+- fund onboarding workflow: `backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/FundOnboardingWorkflowDefinition.cs`
 - contracts: `backend/src/Framework/ConversationalOrchestration.Contracts`
 - repositories: `backend/src/Framework/ConversationalOrchestration.Infrastructure/Repositories/MongoRepositories.cs`
 
@@ -874,14 +864,14 @@ Recovery should happen from persisted operation and review state, not by replayi
 
 - low user concurrency
 - clear plugin path for new agents
-- durable handling for long-running onboarding
+- durable handling for long-running onboarding with checkpoint-based resume/retry
 - safe support for multiple operations in one conversation
 - strong fit for review-first private equity workflows
 
 ### Known simplifications in this sample
 
 - the application is provider-neutral, but the infrastructure currently ships with one OpenAI-compatible adapter
-- onboarding uses dummy timeouts instead of a real external OCR/extraction service
+- onboarding uses dummy workflow steps instead of a real external OCR/extraction service
 - file storage is local, not object storage
 - polling is used instead of SignalR
 - auth is mocked
@@ -889,7 +879,7 @@ Recovery should happen from persisted operation and review state, not by replayi
 ## 16. Recommended Next Steps
 
 - add real policy-based authorization
-- replace dummy onboarding timeouts with external service callbacks or polling adapters
+- replace dummy onboarding workflow steps with external service callbacks or polling adapters
 - centralize all model access behind `Microsoft.Extensions.AI` and a small internal LLM gateway
 - add agent-specific prompt/version tracking for routing and input-completion profiles
 - move file storage to object storage

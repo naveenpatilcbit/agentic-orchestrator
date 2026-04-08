@@ -22,8 +22,8 @@ public sealed class FundOnboardingAgent : IAgent
     public AgentDefinition Definition { get; } = new(
         FundAdministrationAgentIds.FundOnboarding,
         "Fund Onboarding Helper",
-        "Starts the onboarding workflow, waits for external classification, and resumes after human review.",
-        AgentExecutionMode.SagaWorkflow);
+        "Starts the onboarding workflow, waits at review checkpoints, and resumes from stored workflow state.",
+        AgentExecutionMode.Workflow);
 
     public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,

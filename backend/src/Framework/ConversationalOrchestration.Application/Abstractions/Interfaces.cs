@@ -5,7 +5,9 @@ using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.Application.Support;
+using Microsoft.Agents.AI.Workflows;
 
 namespace ConversationalOrchestration.Application.Abstractions;
 
@@ -35,6 +37,22 @@ public interface IReviewTaskRepository
     Task<ReviewTask?> GetAsync(string reviewTaskId, string tenantId, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<ReviewTask>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
     Task UpsertAsync(ReviewTask task, CancellationToken cancellationToken);
+}
+
+public interface IWorkflowInstanceRepository
+{
+    Task<WorkflowInstance?> GetAsync(string workflowInstanceId, string tenantId, CancellationToken cancellationToken);
+    Task<WorkflowInstance?> GetByOperationAsync(string operationId, string tenantId, CancellationToken cancellationToken);
+    Task UpsertAsync(WorkflowInstance instance, CancellationToken cancellationToken);
+}
+
+public interface IWorkflowPendingRequestRepository
+{
+    Task<WorkflowPendingRequest?> GetAsync(string pendingRequestId, string tenantId, CancellationToken cancellationToken);
+    Task<WorkflowPendingRequest?> GetByRequestIdAsync(string workflowInstanceId, string requestId, string tenantId, CancellationToken cancellationToken);
+    Task<WorkflowPendingRequest?> GetLatestOpenByOperationAsync(string operationId, string tenantId, CancellationToken cancellationToken);
+    Task<IReadOnlyCollection<WorkflowPendingRequest>> ListByWorkflowInstanceAsync(string workflowInstanceId, string tenantId, CancellationToken cancellationToken);
+    Task UpsertAsync(WorkflowPendingRequest request, CancellationToken cancellationToken);
 }
 
 public interface IAuditEventRepository
@@ -188,11 +206,77 @@ public interface IReviewContinuationHandler
         CancellationToken cancellationToken);
 }
 
+public interface IWorkflowDefinition
+{
+    string Name { get; }
+    Type StartInputType { get; }
+    Workflow Build();
+    RequestPortDescriptor ResolveRequestPort(string portId);
+}
+
+public interface IWorkflowRegistry
+{
+    IWorkflowDefinition Resolve(string workflowName);
+}
+
+public interface IWorkflowRuntimeService
+{
+    Task<WorkflowRunResult> StartAsync(
+        WorkflowStartRequest request,
+        CancellationToken cancellationToken);
+
+    Task<WorkflowRunResult> ResumeAsync(
+        WorkflowResumeRequest request,
+        CancellationToken cancellationToken);
+
+    Task<WorkflowRunResult> RetryAsync(
+        WorkflowRetryRequest request,
+        CancellationToken cancellationToken);
+}
+
 public sealed record ReviewContinuationContext(
     ConversationThread Conversation,
     AgentOperation Operation,
     ReviewTask ReviewTask,
     TenantExecutionContext RequestContext);
+
+public sealed record RequestPortDescriptor(
+    string PortId,
+    Type RequestType,
+    Type ResponseType,
+    RequestPort Port);
+
+public sealed record WorkflowStartRequest(
+    string TenantId,
+    string ConversationId,
+    string OperationId,
+    string WorkflowName,
+    object Input,
+    string? WorkflowInstanceId = null);
+
+public sealed record WorkflowResumeRequest(
+    string TenantId,
+    string WorkflowInstanceId,
+    string PendingRequestId,
+    string ResponsePayloadJson,
+    string? CheckpointId = null);
+
+public sealed record WorkflowRetryRequest(
+    string TenantId,
+    string WorkflowInstanceId,
+    string? CheckpointId = null);
+
+public sealed record WorkflowOutputMessage(
+    string OutputType,
+    string PayloadJson,
+    string? SourceId = null);
+
+public sealed record WorkflowRunResult(
+    WorkflowInstance Instance,
+    IReadOnlyCollection<WorkflowPendingRequest> PendingRequests,
+    IReadOnlyCollection<WorkflowOutputMessage> Outputs,
+    IReadOnlyCollection<string> ActivatedExecutors,
+    string? ErrorMessage = null);
 
 public sealed record RoutingDecision(
     RoutingDecisionType Type,

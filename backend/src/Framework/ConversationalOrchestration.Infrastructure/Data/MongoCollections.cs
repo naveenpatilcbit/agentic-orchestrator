@@ -5,6 +5,7 @@ using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.Infrastructure.Configuration;
 
 namespace ConversationalOrchestration.Infrastructure.Data;
@@ -35,4 +36,13 @@ public sealed class MongoCollections
 
     public IMongoCollection<FileAsset> Files =>
         _database.GetCollection<FileAsset>("file_assets");
+
+    public IMongoCollection<WorkflowInstance> WorkflowInstances =>
+        _database.GetCollection<WorkflowInstance>("workflow_instances");
+
+    public IMongoCollection<WorkflowPendingRequest> WorkflowPendingRequests =>
+        _database.GetCollection<WorkflowPendingRequest>("workflow_pending_requests");
+
+    public IMongoCollection<WorkflowCheckpointDocument> WorkflowCheckpoints =>
+        _database.GetCollection<WorkflowCheckpointDocument>("workflow_checkpoints");
 }
