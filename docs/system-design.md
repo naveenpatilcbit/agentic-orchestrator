@@ -2,13 +2,8 @@
 
 ## 1. Purpose
 
-This document describes the architecture for an AI-assisted fund administration orchestration layer built on top of a private equity SaaS product.
+This document describes the architecture for an AI-assisted orchestration layer built on top of a private SaaS product.
 
-Primary users:
-
-- Fund Accountants
-- Fund Admins
-- Internal support and operations teams
 
 Primary product goal:
 
@@ -59,7 +54,6 @@ This repo contains a working sample implementation of that architecture using:
 
 - Real authentication and authorization
 - Real OCR/extraction integration
-- Real LLM provider integration
 - Real notification channels beyond polling/chat updates
 - Production-grade deployment hardening
 
