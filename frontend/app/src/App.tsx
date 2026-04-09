@@ -19,10 +19,10 @@ import {
 } from "./api";
 
 const samplePrompts = [
-  "Create a capital call notice for Apex Fund I for $3,500,000",
+  "Create a capital call notice for Apex Fund I for INR 1000",
   "Generate a one-pager for BlueWave Systems",
   "What is the status of onboarding?",
-  "Approve the extraction review",
+  "Approve the capital call allocation review",
 ];
 
 function formatTime(value: string) {
@@ -57,6 +57,40 @@ function actionTone(type: string) {
       return "warning";
     default:
       return "neutral";
+  }
+}
+
+type CapitalCallReviewNotice = {
+  rootFundName?: string;
+  rootCurrency?: string;
+  rootCapitalCallAmount?: number;
+  fundBreakdowns?: Array<unknown>;
+  leafAllocations?: Array<{
+    investorName?: string;
+    currency?: string;
+    contributionAmount?: number;
+  }>;
+};
+
+function formatMoney(value?: number, currency?: string) {
+  if (value == null) {
+    return "Pending";
+  }
+
+  const formatted = value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+  return currency ? `${currency} ${formatted}` : formatted;
+}
+
+function parseCapitalCallReviewNotice(rawJson: string): CapitalCallReviewNotice | null {
+  try {
+    const parsed = JSON.parse(rawJson) as { notice?: CapitalCallReviewNotice };
+    return parsed.notice ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -326,7 +360,7 @@ export default function App() {
             ) : (
               <div className="empty-state">
                 <p>No messages yet.</p>
-                <span>Try uploading onboarding docs, then ask for another agent while the workflow waits.</span>
+                <span>Try creating a capital call notice, then approve the allocation review to generate the Excel output.</span>
               </div>
             )}
           </div>
@@ -384,7 +418,7 @@ export default function App() {
                 />
               ))}
               {openReviewTasks.length === 0 ? (
-                <p className="muted">When the onboarding workflow pauses for classification or extraction review, it will show up here.</p>
+                <p className="muted">Capital call allocation reviews and onboarding checkpoints will appear here whenever a workflow pauses for approval.</p>
               ) : null}
             </div>
           </section>
@@ -400,8 +434,7 @@ export default function App() {
               ))}
               {activeOperations.length === 0 ? (
                 <p className="muted">
-                  No running work yet. Start onboarding, then ask for a one-pager in the same thread
-                  to see concurrent operations handled side by side.
+                  No running work yet. Start a capital call or onboarding flow to see active operations and review checkpoints show up side by side.
                 </p>
               ) : null}
             </div>
@@ -490,6 +523,12 @@ function ReviewCard({
   onReject: () => void;
 }) {
   const operation = operations.find((candidate) => candidate.id === task.operationId);
+  const capitalCallNotice = task.taskType === "CapitalCallAllocationReview"
+    ? parseCapitalCallReviewNotice(task.proposedPayloadJson)
+    : null;
+  const approveLabel = task.taskType === "CapitalCallAllocationReview"
+    ? "Approve & Generate Excel"
+    : "Approve";
 
   return (
     <article className="review-card">
@@ -498,12 +537,30 @@ function ReviewCard({
         <span>{task.taskType}</span>
       </div>
       <p>{operation?.title ?? "Unknown operation"}</p>
+      {capitalCallNotice ? (
+        <div className="review-preview">
+          <div className="review-preview-header">
+            <strong>{capitalCallNotice.rootFundName ?? "Capital Call Allocations"}</strong>
+            <span>{formatMoney(capitalCallNotice.rootCapitalCallAmount, capitalCallNotice.rootCurrency)}</span>
+          </div>
+          <div className="review-preview-meta">
+            <span>{capitalCallNotice.fundBreakdowns?.length ?? 0} fund rollups</span>
+            <span>{capitalCallNotice.leafAllocations?.length ?? 0} leaf allocations</span>
+          </div>
+          {(capitalCallNotice.leafAllocations ?? []).slice(0, 4).map((allocation, index) => (
+            <div className="review-preview-row" key={`${allocation.investorName ?? "investor"}-${index}`}>
+              <span>{allocation.investorName ?? "Investor"}</span>
+              <strong>{formatMoney(allocation.contributionAmount, allocation.currency)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="review-actions">
         <button className="secondary-button" type="button" onClick={onReject}>
           Reject
         </button>
         <button className="primary-button review-approve-button" type="button" onClick={onApprove}>
-          Approve
+          {approveLabel}
         </button>
       </div>
       <pre>{task.proposedPayloadJson}</pre>
