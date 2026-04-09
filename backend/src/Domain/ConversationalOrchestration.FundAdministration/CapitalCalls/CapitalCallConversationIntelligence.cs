@@ -1,9 +1,8 @@
-using System.Globalization;
 using System.Text;
-using System.Text.RegularExpressions;
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Domain.Conversations;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace ConversationalOrchestration.FundAdministration.CapitalCalls;
 
@@ -26,27 +25,18 @@ public interface ICapitalCallConversationIntelligence
 
 public sealed class CapitalCallConversationIntelligence : ICapitalCallConversationIntelligence
 {
-    private static readonly Regex AmountRegex = new(
-        @"(?<currency>₹|rs\.?|inr|\$|usd|eur)?\s*(?<amount>\d[\d,]*(?:\.\d{1,2})?)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex FundRegex = new(
-        @"(?:for|fund)\s+(?<fund>[a-z0-9][a-z0-9\s&\-\._]+?)(?=\s+(?:for|amount|raising|raise|notice|capital)\b|$)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex OverrideRegex = new(
-        @"(?<partner>[a-z0-9][a-z0-9\s&\-\._]+?)\s+(?:override\s+)?(?:to|at)\s+(?<percentage>\d+(?:\.\d+)?)\s*%",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
     private readonly IStructuredLlmClient _structuredLlmClient;
+    private readonly ILogger<CapitalCallConversationIntelligence> _logger;
 
     public CapitalCallConversationIntelligence(
         IConversationHistoryCompactionService conversationHistoryCompactionService,
-        IStructuredLlmClient structuredLlmClient)
+        IStructuredLlmClient structuredLlmClient,
+        ILogger<CapitalCallConversationIntelligence> logger)
     {
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
         _structuredLlmClient = structuredLlmClient;
+        _logger = logger;
     }
 
     public Task<CapitalCallIntentPatch> CaptureIntentAsync(
@@ -88,6 +78,13 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
         var reducedMessages = await LoadCompactedMessagesAsync(tenantId, conversationId, operationId, cancellationToken);
         var effectiveLatestMessage = ResolveEffectiveLatestMessage(latestMessage, reducedMessages);
         var historyTranscript = BuildTranscript(reducedMessages);
+        _logger.LogInformation(
+            "Extracting capital call intent patch for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Task={TaskInstruction} ReducedMessages={ReducedMessageCount}",
+            tenantId,
+            conversationId,
+            operationId,
+            taskInstruction,
+            reducedMessages.Count);
 
         var llmPatch = await _structuredLlmClient.GetStructuredResponseAsync<CapitalCallIntentPatch>(
             new StructuredLlmRequest(
@@ -117,10 +114,23 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
 
         if (llmPatch is not null && HasAnyValue(llmPatch))
         {
+            _logger.LogInformation(
+                "Capital call intent extraction used LLM result for tenant {TenantId} conversation {ConversationId} operation {OperationId}. FundName={FundName} Amount={Amount} OverrideCount={OverrideCount}",
+                tenantId,
+                conversationId,
+                operationId,
+                llmPatch.FundName,
+                llmPatch.CapitalCallAmount,
+                llmPatch.PartnerOverrides.Count);
             return llmPatch;
         }
 
-        return BuildFallbackPatch(effectiveLatestMessage);
+        _logger.LogWarning(
+            "Capital call intent extraction returned no usable structured values for tenant {TenantId} conversation {ConversationId} operation {OperationId}.",
+            tenantId,
+            conversationId,
+            operationId);
+        return new CapitalCallIntentPatch();
     }
 
     private async Task<IReadOnlyList<ChatMessage>> LoadCompactedMessagesAsync(
@@ -174,46 +184,4 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
         patch.CapitalCallAmount.HasValue ||
         !string.IsNullOrWhiteSpace(patch.NoticeDate) ||
         patch.PartnerOverrides.Count > 0;
-
-    private static CapitalCallIntentPatch BuildFallbackPatch(string latestMessage)
-    {
-        var patch = new CapitalCallIntentPatch();
-        var normalized = latestMessage.Trim();
-
-        var fundMatch = FundRegex.Match(normalized);
-        if (fundMatch.Success)
-        {
-            patch.FundName = NormalizeName(fundMatch.Groups["fund"].Value);
-        }
-
-        var amountMatch = AmountRegex.Match(normalized);
-        if (amountMatch.Success &&
-            decimal.TryParse(
-                amountMatch.Groups["amount"].Value.Replace(",", string.Empty, StringComparison.Ordinal),
-                NumberStyles.Number,
-                CultureInfo.InvariantCulture,
-                out var amount))
-        {
-            patch.CapitalCallAmount = amount;
-        }
-
-        foreach (Match match in OverrideRegex.Matches(normalized))
-        {
-            if (!decimal.TryParse(match.Groups["percentage"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var percentage))
-            {
-                continue;
-            }
-
-            patch.PartnerOverrides.Add(new CapitalCallPartnerOverride
-            {
-                PartnerName = NormalizeName(match.Groups["partner"].Value),
-                CommitmentPercentage = percentage
-            });
-        }
-
-        return patch;
-    }
-
-    private static string NormalizeName(string value) =>
-        Regex.Replace(value.Trim(), @"\s+", " ");
 }

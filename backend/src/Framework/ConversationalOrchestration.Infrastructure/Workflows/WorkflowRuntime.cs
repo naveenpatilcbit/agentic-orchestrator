@@ -4,6 +4,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Agents.AI.Workflows.Declarative.Events;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
 namespace ConversationalOrchestration.Infrastructure.Workflows;
@@ -30,24 +31,34 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
     private readonly IWorkflowPendingRequestRepository _workflowPendingRequestRepository;
     private readonly CheckpointManager _checkpointManager;
     private readonly JsonSerializerOptions _serializerOptions;
+    private readonly ILogger<WorkflowRuntimeService> _logger;
 
     public WorkflowRuntimeService(
         IWorkflowRegistry workflowRegistry,
         IWorkflowInstanceRepository workflowInstanceRepository,
         IWorkflowPendingRequestRepository workflowPendingRequestRepository,
-        MongoJsonCheckpointStore checkpointStore)
+        MongoJsonCheckpointStore checkpointStore,
+        ILogger<WorkflowRuntimeService> logger)
     {
         _workflowRegistry = workflowRegistry;
         _workflowInstanceRepository = workflowInstanceRepository;
         _workflowPendingRequestRepository = workflowPendingRequestRepository;
         _serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         _checkpointManager = CheckpointManager.CreateJson(checkpointStore, _serializerOptions);
+        _logger = logger;
     }
 
     public async Task<WorkflowRunResult> StartAsync(
         WorkflowStartRequest request,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Starting workflow {WorkflowName} for tenant {TenantId} conversation {ConversationId} operation {OperationId}. RequestedInstanceId={RequestedWorkflowInstanceId}",
+            request.WorkflowName,
+            request.TenantId,
+            request.ConversationId,
+            request.OperationId,
+            request.WorkflowInstanceId);
         var definition = _workflowRegistry.Resolve(request.WorkflowName);
         var instance = new WorkflowInstance
         {
@@ -61,6 +72,11 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         };
 
         await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
+        _logger.LogInformation(
+            "Created workflow instance {WorkflowInstanceId} for workflow {WorkflowName} on operation {OperationId}.",
+            instance.Id,
+            request.WorkflowName,
+            request.OperationId);
 
         var buildContext = CreateBuildContext(instance);
         await using var run = await RunWorkflowAsync(definition, request.Input, buildContext, cancellationToken);
@@ -72,6 +88,12 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         WorkflowResumeRequest request,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Resuming workflow instance {WorkflowInstanceId} for tenant {TenantId}. PendingRequestId={PendingRequestId} CheckpointId={CheckpointId}",
+            request.WorkflowInstanceId,
+            request.TenantId,
+            request.PendingRequestId,
+            request.CheckpointId);
         var instance = await _workflowInstanceRepository.GetAsync(request.WorkflowInstanceId, request.TenantId, cancellationToken)
             ?? throw new InvalidOperationException($"Workflow instance '{request.WorkflowInstanceId}' was not found.");
         var pendingRequest = await _workflowPendingRequestRepository.GetAsync(request.PendingRequestId, request.TenantId, cancellationToken)
@@ -109,6 +131,11 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         WorkflowRetryRequest request,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Retrying workflow instance {WorkflowInstanceId} for tenant {TenantId}. CheckpointId={CheckpointId}",
+            request.WorkflowInstanceId,
+            request.TenantId,
+            request.CheckpointId);
         var instance = await _workflowInstanceRepository.GetAsync(request.WorkflowInstanceId, request.TenantId, cancellationToken)
             ?? throw new InvalidOperationException($"Workflow instance '{request.WorkflowInstanceId}' was not found.");
         var definition = _workflowRegistry.Resolve(instance.WorkflowName);
@@ -170,6 +197,10 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                             cancellationToken);
                         if (automaticResponse is not null)
                         {
+                            _logger.LogInformation(
+                                "Workflow instance {WorkflowInstanceId} produced automatic response for port {PortId}.",
+                                instance.Id,
+                                requestInfoEvent.Request.PortInfo.PortId);
                             automaticResponses.Add(automaticResponse);
                             break;
                         }
@@ -179,6 +210,12 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                             instance,
                             requestInfoEvent,
                             cancellationToken);
+                        _logger.LogInformation(
+                            "Workflow instance {WorkflowInstanceId} is waiting for external input. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+                            instance.Id,
+                            pendingRequest.Id,
+                            pendingRequest.PortId,
+                            pendingRequest.RequestId);
                         pendingRequests.Add(pendingRequest);
                         break;
                     }
@@ -209,6 +246,10 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                         break;
                     }
                     case WorkflowErrorEvent workflowErrorEvent:
+                        _logger.LogError(
+                            workflowErrorEvent.Exception,
+                            "Workflow instance {WorkflowInstanceId} emitted an error event.",
+                            instance.Id);
                         errorMessage = workflowErrorEvent.Exception?.Message ?? workflowEvent.ToString();
                         break;
                     case SuperStepCompletedEvent superStepCompletedEvent:
@@ -217,6 +258,10 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                         if (completionInfo?.Checkpoint is not null)
                         {
                             latestCheckpointId = completionInfo.Checkpoint.CheckpointId;
+                            _logger.LogInformation(
+                                "Workflow instance {WorkflowInstanceId} completed super step. CheckpointId={CheckpointId}",
+                                instance.Id,
+                                latestCheckpointId);
                         }
 
                         if (completionInfo is null)
@@ -280,6 +325,15 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             ?? (instance.Status == WorkflowInstanceStatus.Completed ? "Completed" : instance.CurrentStep);
 
         await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
+        _logger.LogInformation(
+            "Persisted workflow instance {WorkflowInstanceId}. Status={Status} CurrentStep={CurrentStep} CheckpointId={CheckpointId} PendingRequests={PendingRequestCount} Outputs={OutputCount} Error={ErrorMessage}",
+            instance.Id,
+            instance.Status,
+            instance.CurrentStep,
+            instance.LatestCheckpointId,
+            pendingRequests.Count,
+            outputs.Count,
+            errorMessage);
 
         return new WorkflowRunResult(
             instance,
@@ -320,6 +374,12 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         pendingRequest.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
         await _workflowPendingRequestRepository.UpsertAsync(pendingRequest, cancellationToken);
+        _logger.LogDebug(
+            "Upserted workflow pending request {PendingRequestId} for workflow instance {WorkflowInstanceId}. PortId={PortId} RequestId={RequestId}",
+            pendingRequest.Id,
+            instance.Id,
+            pendingRequest.PortId,
+            pendingRequest.RequestId);
         return pendingRequest;
     }
 
@@ -364,17 +424,27 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             return null;
         }
 
-        var directText = externalInputRequest.AgentResponse.Text;
+        var agentResponse = externalInputRequest.AgentResponse;
+        if (agentResponse is null)
+        {
+            return null;
+        }
+
+        var directText = agentResponse.Text;
         if (!string.IsNullOrWhiteSpace(directText))
         {
             return directText;
         }
 
-        return string.Join(
+        var promptText = string.Join(
             "\n",
-            externalInputRequest.AgentResponse.Messages
+            agentResponse.Messages
                 .Select(message => message.Text)
                 .Where(text => !string.IsNullOrWhiteSpace(text)));
+
+        return string.IsNullOrWhiteSpace(promptText)
+            ? null
+            : promptText;
     }
 
     private static ChatRole ParseChatRole(string? role) =>

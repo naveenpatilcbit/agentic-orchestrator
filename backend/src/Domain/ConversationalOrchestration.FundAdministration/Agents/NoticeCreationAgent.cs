@@ -23,7 +23,7 @@ public sealed class NoticeCreationAgent : IAgent
     public AgentDefinition Definition { get; } = new(
         FundAdministrationAgentIds.NoticeCreation,
         "Notice Creation Helper",
-        "Calculates partner and feeder allocations for a capital call notice, routes them through human review, then generates a downloadable Excel output.",
+        "Extracts partner and feeder commitment data for a capital call notice, routes it through human review, then calculates approved allocations for downstream template output.",
         AgentExecutionMode.Workflow);
 
     public async Task<AgentExecutionResult> StartAsync(
@@ -97,7 +97,7 @@ public sealed class NoticeCreationAgent : IAgent
         if (operation.Status == AgentOperationStatus.WaitingForHumanReview)
         {
             return Task.FromResult(string.IsNullOrWhiteSpace(operation.Summary)
-                ? "Capital call allocations are waiting for review approval."
+                ? "Extracted capital call partner data is waiting for human review."
                 : operation.Summary);
         }
 
@@ -123,21 +123,15 @@ public sealed class NoticeCreationAgent : IAgent
                 }],
                 BuildAudit(operation, "CapitalCallClarificationRequested", new { operation.PendingClarification })),
 
-            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.DownloadRoute) => new AgentExecutionResult(
-                $"I calculated the partner allocations for {data.FundName} and generated a downloadable Excel file.",
+            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.NoticeDtoJson) => new AgentExecutionResult(
+                $"I applied the reviewed partner data for {data.FundName} and calculated the final allocations. The approved data is now ready for a separate template output operation.",
                 operation,
-                [new AgentAction
-                {
-                    Type = AgentActionType.DownloadArtifact,
-                    Label = "Download Excel output",
-                    Route = data.DownloadRoute,
-                    PayloadJson = JsonContent.Serialize(data)
-                }],
-                BuildAudit(operation, "CapitalCallArtifactMaterialized", data)),
+                BuildCompletedActions(operation, data),
+                BuildAudit(operation, "CapitalCallReviewedDataReady", data)),
 
             AgentOperationStatus.WaitingForHumanReview => new AgentExecutionResult(
                 string.IsNullOrWhiteSpace(operation.Summary)
-                    ? "Capital call allocations are ready for review before the Excel output is generated."
+                    ? "Extracted partner and commitment data is ready for review before the allocation engine continues."
                     : operation.Summary,
                 operation,
                 [new AgentAction
@@ -185,4 +179,33 @@ public sealed class NoticeCreationAgent : IAgent
             DataJson = JsonContent.Serialize(payload)
         }
     ];
+
+    private static IReadOnlyCollection<AgentAction> BuildCompletedActions(AgentOperation operation, CapitalCallOperationData data)
+    {
+        var actions = new List<AgentAction>();
+
+        if (!string.IsNullOrWhiteSpace(data.ReviewDownloadRoute))
+        {
+            actions.Add(new AgentAction
+            {
+                Type = AgentActionType.DownloadArtifact,
+                Label = "Download reviewed workbook",
+                Route = data.ReviewDownloadRoute,
+                PayloadJson = JsonContent.Serialize(data)
+            });
+        }
+
+        actions.Add(new AgentAction
+        {
+            Type = AgentActionType.StartAsyncOperation,
+            Label = "Generate template output",
+            PayloadJson = JsonContent.Serialize(new
+            {
+                sourceOperationId = operation.Id,
+                startMessage = $"Generate template output for approved capital call operation {operation.Id}"
+            })
+        });
+
+        return actions;
+    }
 }

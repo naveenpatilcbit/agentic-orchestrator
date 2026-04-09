@@ -54,6 +54,8 @@ public sealed record ReviewTaskDto(
     string Title,
     string TaskType,
     string Status,
+    string InteractionMode,
+    string? InstructionText,
     string ProposedPayloadJson,
     string? FinalPayloadJson,
     string? Notes,
@@ -68,6 +70,6 @@ public sealed record FileAssetDto(
     DateTimeOffset UploadedAtUtc);
 
 public sealed record ReviewDecisionRequest(
-    string Decision,
+    string Action,
     string? FinalPayloadJson,
     string? Notes);

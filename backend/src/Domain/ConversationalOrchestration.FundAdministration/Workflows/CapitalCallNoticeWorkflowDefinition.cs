@@ -14,20 +14,24 @@ public static partial class FundAdministrationWorkflowNames
 
 public static class CapitalCallNoticeWorkflowPorts
 {
-    public const string AllocationReview = "capital-call-allocation-review";
+    public const string ExtractionReview = "capital-call-extraction-review";
 }
 
-public sealed record CapitalCallAllocationReviewPayload(
-    string TenantId,
-    string ConversationId,
-    string OperationId,
+public sealed record CapitalCallWorkflowCompleted(
     string RequestStateJson,
-    CapitalCallNoticeDto Notice);
+    string ReviewedExtractionJson,
+    string NoticeDtoJson,
+    string FundName,
+    string RootCurrency,
+    decimal RootCapitalCallAmount,
+    string? ReviewFileAssetId,
+    string? ReviewDownloadRoute,
+    string? ReviewFileName);
 
 public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 {
-    private static readonly RequestPort<CapitalCallAllocationReviewPayload, CapitalCallAllocationReviewPayload> AllocationReviewPort =
-        RequestPort.Create<CapitalCallAllocationReviewPayload, CapitalCallAllocationReviewPayload>(CapitalCallNoticeWorkflowPorts.AllocationReview);
+    private static readonly RequestPort<CapitalCallExtractionReviewPayload, CapitalCallExtractionReviewPayload> ExtractionReviewPort =
+        RequestPort.Create<CapitalCallExtractionReviewPayload, CapitalCallExtractionReviewPayload>(CapitalCallNoticeWorkflowPorts.ExtractionReview);
 
     private readonly IServiceScopeFactory _serviceScopeFactory;
 
@@ -42,34 +46,34 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 
     public Workflow Build(WorkflowBuildContext buildContext)
     {
-        // This workflow covers the deterministic execution phase after chat intake has already
-        // collected the required request inputs.
-        // User clarification happens before the workflow starts.
+        // Chat intake already collected fund name, amount, and source resolution before this workflow starts.
+        // Inside the workflow we first build the extracted partner/feeder tree, pause for human review and edits,
+        // then run the deterministic allocation engine using the reviewed extraction payload.
         var loadRequestState = new LoadRequestStateExecutor().BindExecutor();
+        var buildExtractionReview = new BuildCapitalCallExtractionReviewExecutor(_serviceScopeFactory).BindExecutor();
+        var extractionReview = ExtractionReviewPort.BindAsExecutor();
         var computeAllocations = new ComputeCapitalCallAllocationsExecutor(_serviceScopeFactory).BindExecutor();
-        var allocationReview = AllocationReviewPort.BindAsExecutor();
-        var materializeResult = new MaterializeCapitalCallResultExecutor(_serviceScopeFactory).BindExecutor();
+        var finalizeReviewedAllocations = new FinalizeApprovedCapitalCallExecutor().BindExecutor();
 
-        // Graph shape:
-        // start -> load request state -> compute allocations -> human review -> materialize result -> output
         return new WorkflowBuilder(loadRequestState)
             .WithName("Capital Call Notice")
-            .WithDescription("Loads request state, computes capital call allocations, pauses for human review, and materializes the final Excel output.")
-            .AddEdge(loadRequestState, computeAllocations, "load -> compute", idempotent: true)
-            .AddEdge(computeAllocations, allocationReview, "compute -> review", idempotent: true)
-            .AddEdge(allocationReview, materializeResult, "review -> materialize", idempotent: true)
-            .WithOutputFrom(materializeResult)
+            .WithDescription("Builds extracted partner data, pauses for human review and edits, then computes approved capital call allocations for downstream template operations.")
+            .AddEdge(loadRequestState, buildExtractionReview, "load -> build review", idempotent: true)
+            .AddEdge(buildExtractionReview, extractionReview, "build review -> human review", idempotent: true)
+            .AddEdge(extractionReview, computeAllocations, "human review -> compute", idempotent: true)
+            .AddEdge(computeAllocations, finalizeReviewedAllocations, "compute -> finalize", idempotent: true)
+            .WithOutputFrom(finalizeReviewedAllocations)
             .Build(validateOrphans: true);
     }
 
     public RequestPortDescriptor ResolveRequestPort(string portId) =>
         portId switch
         {
-            CapitalCallNoticeWorkflowPorts.AllocationReview => new RequestPortDescriptor(
-                CapitalCallNoticeWorkflowPorts.AllocationReview,
-                typeof(CapitalCallAllocationReviewPayload),
-                typeof(CapitalCallAllocationReviewPayload),
-                AllocationReviewPort),
+            CapitalCallNoticeWorkflowPorts.ExtractionReview => new RequestPortDescriptor(
+                CapitalCallNoticeWorkflowPorts.ExtractionReview,
+                typeof(CapitalCallExtractionReviewPayload),
+                typeof(CapitalCallExtractionReviewPayload),
+                ExtractionReviewPort),
             _ => throw new InvalidOperationException(
                 $"Workflow '{Name}' does not define request port '{portId}'. Capital call clarification currently happens before the workflow starts.")
         };
@@ -106,9 +110,49 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         }
     }
 
-    // Executes the deterministic allocation engine and packages the computed notice DTO into the
-    // review payload that is shown to the human approver before any output artifact is created.
-    private sealed class ComputeCapitalCallAllocationsExecutor : Executor<CapitalCallWorkflowRequestState, CapitalCallAllocationReviewPayload>
+    // Builds the extracted partner/feeder tree that the reviewer can inspect and edit before any
+    // allocation math is run. The review workbook is generated from this extraction payload.
+    private sealed class BuildCapitalCallExtractionReviewExecutor : Executor<CapitalCallWorkflowRequestState, CapitalCallExtractionReviewPayload>
+    {
+        private readonly IServiceScopeFactory _serviceScopeFactory;
+
+        public BuildCapitalCallExtractionReviewExecutor(IServiceScopeFactory serviceScopeFactory)
+            : base("build_extraction_review")
+        {
+            _serviceScopeFactory = serviceScopeFactory;
+        }
+
+        public override async ValueTask<CapitalCallExtractionReviewPayload> HandleAsync(
+            CapitalCallWorkflowRequestState input,
+            IWorkflowContext context,
+            CancellationToken cancellationToken)
+        {
+            await using var scope = _serviceScopeFactory.CreateAsyncScope();
+            var extractionReviewService = scope.ServiceProvider.GetRequiredService<ICapitalCallExtractionReviewService>();
+            var reviewArtifactService = scope.ServiceProvider.GetRequiredService<ICapitalCallReviewArtifactService>();
+            var reviewPayload = await extractionReviewService.BuildAsync(
+                input.TenantId,
+                input.ConversationId,
+                input.OperationId,
+                input.RequestStateJson,
+                cancellationToken);
+            var reviewArtifact = await reviewArtifactService.CreateAsync(
+                input.TenantId,
+                input.ConversationId,
+                input.OperationId,
+                JsonContent.Serialize(reviewPayload),
+                cancellationToken);
+
+            reviewPayload.ReviewFileAssetId = reviewArtifact.FileAssetId;
+            reviewPayload.ReviewDownloadRoute = reviewArtifact.DownloadRoute;
+            reviewPayload.ReviewFileName = reviewArtifact.FileName;
+            return reviewPayload;
+        }
+    }
+
+    // Runs the deterministic allocation engine only after the human-reviewed extraction payload is
+    // available. That means suggested edits from the reviewer directly affect the math.
+    private sealed class ComputeCapitalCallAllocationsExecutor : Executor<CapitalCallExtractionReviewPayload, CapitalCallComputedWorkflowState>
     {
         private readonly IServiceScopeFactory _serviceScopeFactory;
 
@@ -118,8 +162,8 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             _serviceScopeFactory = serviceScopeFactory;
         }
 
-        public override async ValueTask<CapitalCallAllocationReviewPayload> HandleAsync(
-            CapitalCallWorkflowRequestState input,
+        public override async ValueTask<CapitalCallComputedWorkflowState> HandleAsync(
+            CapitalCallExtractionReviewPayload input,
             IWorkflowContext context,
             CancellationToken cancellationToken)
         {
@@ -128,45 +172,36 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             var result = await engine.ComputeAsync(
                 input.TenantId,
                 input.ConversationId,
-                input.RequestStateJson,
+                JsonContent.Serialize(input),
                 cancellationToken);
 
-            return new CapitalCallAllocationReviewPayload(
-                input.TenantId,
-                input.ConversationId,
-                input.OperationId,
-                input.RequestStateJson,
-                result.Notice);
+            return new CapitalCallComputedWorkflowState(input, result);
         }
     }
 
-    // Persists the final user-facing result only after the human has approved the reviewed
-    // allocation payload. The current implementation materializes to an Excel artifact.
-    private sealed class MaterializeCapitalCallResultExecutor : Executor<CapitalCallAllocationReviewPayload, CapitalCallMaterializationResult>
+    // Finalizes the workflow output after review approval and deterministic allocation. Template
+    // rendering happens as a separate reusable operation.
+    private sealed class FinalizeApprovedCapitalCallExecutor : Executor<CapitalCallComputedWorkflowState, CapitalCallWorkflowCompleted>
     {
-        private readonly IServiceScopeFactory _serviceScopeFactory;
-
-        public MaterializeCapitalCallResultExecutor(IServiceScopeFactory serviceScopeFactory)
-            : base("materialize_result")
+        public FinalizeApprovedCapitalCallExecutor()
+            : base("finalize_approved_data")
         {
-            _serviceScopeFactory = serviceScopeFactory;
         }
 
-        public override async ValueTask<CapitalCallMaterializationResult> HandleAsync(
-            CapitalCallAllocationReviewPayload input,
+        public override ValueTask<CapitalCallWorkflowCompleted> HandleAsync(
+            CapitalCallComputedWorkflowState input,
             IWorkflowContext context,
             CancellationToken cancellationToken)
-        {
-            await using var scope = _serviceScopeFactory.CreateAsyncScope();
-            var materializer = scope.ServiceProvider.GetRequiredService<ICapitalCallResultMaterializer>();
-            return await materializer.MaterializeAsync(
-                input.TenantId,
-                input.ConversationId,
-                input.OperationId,
-                input.RequestStateJson,
-                JsonContent.Serialize(input.Notice),
-                cancellationToken);
-        }
+            => ValueTask.FromResult(new CapitalCallWorkflowCompleted(
+                input.ReviewPayload.RequestStateJson,
+                JsonContent.Serialize(input.ReviewPayload),
+                input.ComputationResult.NoticeDtoJson,
+                input.ComputationResult.Notice.RootFundName,
+                input.ComputationResult.Notice.RootCurrency,
+                input.ComputationResult.Notice.RootCapitalCallAmount,
+                input.ReviewPayload.ReviewFileAssetId,
+                input.ReviewPayload.ReviewDownloadRoute,
+                input.ReviewPayload.ReviewFileName));
     }
 
     // Shared state after loading request data and before running the allocation engine.
@@ -175,4 +210,8 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         string ConversationId,
         string OperationId,
         string RequestStateJson);
+
+    private sealed record CapitalCallComputedWorkflowState(
+        CapitalCallExtractionReviewPayload ReviewPayload,
+        CapitalCallComputationResult ComputationResult);
 }

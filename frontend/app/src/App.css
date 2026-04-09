@@ -523,6 +523,14 @@ body {
   color: var(--qapita-muted);
 }
 
+.review-instruction {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(105, 65, 148, 0.06);
+  color: var(--qapita-text);
+}
+
 .card-topline,
 .meta-row {
   display: flex;
@@ -587,6 +595,33 @@ body {
   font-size: 0.82rem;
 }
 
+.review-payload-editor {
+  width: 100%;
+  min-height: 240px;
+  margin: 0;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--qapita-border);
+  background: var(--qapita-surface-alt);
+  color: var(--qapita-text);
+  font-family: "Lato", monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.review-payload-editor:focus {
+  outline: none;
+  border-color: rgba(105, 65, 148, 0.42);
+  box-shadow: 0 0 0 3px rgba(105, 65, 148, 0.12);
+}
+
+.review-error {
+  margin: 10px 0 0;
+  color: #8c3f29;
+  font-size: 0.82rem;
+}
+
 .review-preview {
   display: grid;
   gap: 10px;
@@ -628,6 +663,12 @@ body {
 
 .review-preview-row strong {
   color: var(--qapita-primary);
+}
+
+.review-download-button {
+  width: 100%;
+  margin-bottom: 14px;
+  text-align: center;
 }
 
 .review-actions {

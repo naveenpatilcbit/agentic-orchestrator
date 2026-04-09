@@ -34,6 +34,8 @@ export type ReviewTask = {
   title: string;
   taskType: string;
   status: string;
+  interactionMode: string;
+  instructionText?: string | null;
   proposedPayloadJson: string;
   finalPayloadJson?: string | null;
   notes?: string | null;

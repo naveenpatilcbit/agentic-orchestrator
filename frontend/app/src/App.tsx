@@ -22,7 +22,7 @@ const samplePrompts = [
   "Create a capital call notice for Apex Fund I for INR 1000",
   "Generate a one-pager for BlueWave Systems",
   "What is the status of onboarding?",
-  "Approve the capital call allocation review",
+  "Open the capital call review task",
 ];
 
 function formatTime(value: string) {
@@ -60,35 +60,102 @@ function actionTone(type: string) {
   }
 }
 
-type CapitalCallReviewNotice = {
-  rootFundName?: string;
-  rootCurrency?: string;
-  rootCapitalCallAmount?: number;
-  fundBreakdowns?: Array<unknown>;
-  leafAllocations?: Array<{
-    investorName?: string;
-    currency?: string;
-    contributionAmount?: number;
-  }>;
+type CapitalCallReviewPartner = {
+  partnerName?: string;
+  partnerType?: string;
+  commitmentPercentage?: number;
+  childFund?: CapitalCallReviewFund | null;
 };
 
-function formatMoney(value?: number, currency?: string) {
-  if (value == null) {
-    return "Pending";
+type CapitalCallReviewFund = {
+  fundName?: string;
+  fundCurrency?: string;
+  path?: string;
+  partners?: CapitalCallReviewPartner[];
+};
+
+type CapitalCallReviewPayload = {
+  reviewDownloadRoute?: string;
+  reviewFileName?: string;
+  rootFund?: CapitalCallReviewFund;
+};
+
+function parseCapitalCallReviewPayload(rawJson: string): CapitalCallReviewPayload | null {
+  try {
+    return JSON.parse(rawJson) as CapitalCallReviewPayload;
+  } catch {
+    return null;
   }
-
-  const formatted = value.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-
-  return currency ? `${currency} ${formatted}` : formatted;
 }
 
-function parseCapitalCallReviewNotice(rawJson: string): CapitalCallReviewNotice | null {
+function prettyJson(rawJson: string) {
   try {
-    const parsed = JSON.parse(rawJson) as { notice?: CapitalCallReviewNotice };
-    return parsed.notice ?? null;
+    return JSON.stringify(JSON.parse(rawJson), null, 2);
+  } catch {
+    return rawJson;
+  }
+}
+
+function countFundNodes(fund?: CapitalCallReviewFund | null): number {
+  if (!fund) {
+    return 0;
+  }
+
+  return 1 + (fund.partners ?? []).reduce(
+    (total, partner) => total + countFundNodes(partner.childFund),
+    0,
+  );
+}
+
+function countPartners(fund?: CapitalCallReviewFund | null): number {
+  if (!fund) {
+    return 0;
+  }
+
+  return (fund.partners?.length ?? 0) + (fund.partners ?? []).reduce(
+    (total, partner) => total + countPartners(partner.childFund),
+    0,
+  );
+}
+
+type CapitalCallReviewPreviewRow = {
+  path: string;
+  partnerName: string;
+  partnerType: string;
+  commitmentPercentage?: number;
+};
+
+function buildCapitalCallPreviewRows(
+  fund?: CapitalCallReviewFund | null,
+  rows: CapitalCallReviewPreviewRow[] = [],
+): CapitalCallReviewPreviewRow[] {
+  if (!fund) {
+    return rows;
+  }
+
+  for (const partner of fund.partners ?? []) {
+    rows.push({
+      path: fund.path ?? fund.fundName ?? "Fund",
+      partnerName: partner.partnerName ?? "Partner",
+      partnerType: partner.partnerType ?? "Investor",
+      commitmentPercentage: partner.commitmentPercentage,
+    });
+
+    if (partner.childFund) {
+      buildCapitalCallPreviewRows(partner.childFund, rows);
+    }
+  }
+
+  return rows;
+}
+
+function parseActionPayload(rawJson?: string | null): { startMessage?: string } | null {
+  if (!rawJson) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawJson) as { startMessage?: string };
   } catch {
     return null;
   }
@@ -227,14 +294,20 @@ export default function App() {
     }
   }
 
-  async function handleDecision(task: ReviewTask, decision: "Approved" | "Rejected") {
+  async function handleDecision(
+    task: ReviewTask,
+    action: string,
+    finalPayloadJson?: string,
+    notes?: string,
+  ) {
     setIsBusy(true);
     setError(null);
     try {
       const updated = await submitReviewDecision(
         task.id,
-        decision,
-        task.proposedPayloadJson,
+        action,
+        finalPayloadJson,
+        notes,
       );
       setSnapshot(updated);
     } catch (decisionError) {
@@ -355,12 +428,35 @@ export default function App() {
           <div className="message-stream">
             {snapshot?.messages.length ? (
               snapshot.messages.map((entry) => (
-                <MessageCard key={entry.id} message={entry} operations={snapshot.operations} />
+                <MessageCard
+                  key={entry.id}
+                  message={entry}
+                  operations={snapshot.operations}
+                  onAction={async (action) => {
+                    if (action.type === "StartAsyncOperation") {
+                      const payload = parseActionPayload(action.payloadJson);
+                      if (payload?.startMessage) {
+                        await handleSend(payload.startMessage);
+                        return;
+                      }
+                    }
+
+                    if (action.route) {
+                      if (action.route.startsWith("/api/")) {
+                        const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+                        window.open(new URL(action.route, baseUrl).toString(), "_blank", "noopener,noreferrer");
+                        return;
+                      }
+
+                      window.alert(`Open route: ${action.route}`);
+                    }
+                  }}
+                />
               ))
             ) : (
               <div className="empty-state">
                 <p>No messages yet.</p>
-                <span>Try creating a capital call notice, then approve the allocation review to generate the Excel output.</span>
+                <span>Try creating a capital call notice, review the extracted partner data, then start a template output operation from the approved result.</span>
               </div>
             )}
           </div>
@@ -413,12 +509,11 @@ export default function App() {
                   key={task.id}
                   task={task}
                   operations={snapshot?.operations ?? []}
-                  onApprove={() => handleDecision(task, "Approved")}
-                  onReject={() => handleDecision(task, "Rejected")}
+                  onSubmit={(action, finalPayloadJson, notes) => handleDecision(task, action, finalPayloadJson, notes)}
                 />
               ))}
               {openReviewTasks.length === 0 ? (
-                <p className="muted">Capital call allocation reviews and onboarding checkpoints will appear here whenever a workflow pauses for approval.</p>
+                <p className="muted">Editable capital call reviews and approve/reject onboarding checkpoints will appear here whenever a workflow pauses for human input.</p>
               ) : null}
             </div>
           </section>
@@ -514,21 +609,43 @@ function OperationCard({ operation }: { operation: AgentOperation }) {
 function ReviewCard({
   task,
   operations,
-  onApprove,
-  onReject,
+  onSubmit,
 }: {
   task: ReviewTask;
   operations: AgentOperation[];
-  onApprove: () => void;
-  onReject: () => void;
+  onSubmit: (action: string, finalPayloadJson?: string, notes?: string) => void;
 }) {
   const operation = operations.find((candidate) => candidate.id === task.operationId);
-  const capitalCallNotice = task.taskType === "CapitalCallAllocationReview"
-    ? parseCapitalCallReviewNotice(task.proposedPayloadJson)
+  const [draftPayload, setDraftPayload] = useState(prettyJson(task.finalPayloadJson ?? task.proposedPayloadJson));
+  const [payloadError, setPayloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraftPayload(prettyJson(task.finalPayloadJson ?? task.proposedPayloadJson));
+    setPayloadError(null);
+  }, [task.id, task.finalPayloadJson, task.proposedPayloadJson]);
+
+  const isEditable = task.interactionMode === "EditAndSubmit";
+  const capitalCallReviewPayload = task.taskType === "CapitalCallExtractionReview"
+    ? parseCapitalCallReviewPayload(task.proposedPayloadJson)
     : null;
-  const approveLabel = task.taskType === "CapitalCallAllocationReview"
-    ? "Approve & Generate Excel"
-    : "Approve";
+  const capitalCallFund = capitalCallReviewPayload?.rootFund ?? null;
+  const previewRows = buildCapitalCallPreviewRows(capitalCallFund).slice(0, 6);
+  const primaryLabel = isEditable ? "Submit Reviewed Data" : "Approve";
+
+  function handlePrimaryAction() {
+    if (!isEditable) {
+      onSubmit("Approved", task.proposedPayloadJson);
+      return;
+    }
+
+    try {
+      const normalized = JSON.stringify(JSON.parse(draftPayload), null, 2);
+      setPayloadError(null);
+      onSubmit("Submitted", normalized, "Reviewed and edited from the review queue.");
+    } catch {
+      setPayloadError("The edited payload is not valid JSON yet. Fix it before submitting.");
+    }
+  }
 
   return (
     <article className="review-card">
@@ -537,43 +654,76 @@ function ReviewCard({
         <span>{task.taskType}</span>
       </div>
       <p>{operation?.title ?? "Unknown operation"}</p>
-      {capitalCallNotice ? (
+      {task.instructionText ? <p className="review-instruction">{task.instructionText}</p> : null}
+      {capitalCallFund ? (
         <div className="review-preview">
           <div className="review-preview-header">
-            <strong>{capitalCallNotice.rootFundName ?? "Capital Call Allocations"}</strong>
-            <span>{formatMoney(capitalCallNotice.rootCapitalCallAmount, capitalCallNotice.rootCurrency)}</span>
+            <strong>{capitalCallFund.fundName ?? "Capital Call Partner Data"}</strong>
+            <span>{capitalCallFund.fundCurrency ?? "Currency pending"}</span>
           </div>
           <div className="review-preview-meta">
-            <span>{capitalCallNotice.fundBreakdowns?.length ?? 0} fund rollups</span>
-            <span>{capitalCallNotice.leafAllocations?.length ?? 0} leaf allocations</span>
+            <span>{countFundNodes(capitalCallFund)} funds in tree</span>
+            <span>{countPartners(capitalCallFund)} partners extracted</span>
           </div>
-          {(capitalCallNotice.leafAllocations ?? []).slice(0, 4).map((allocation, index) => (
-            <div className="review-preview-row" key={`${allocation.investorName ?? "investor"}-${index}`}>
-              <span>{allocation.investorName ?? "Investor"}</span>
-              <strong>{formatMoney(allocation.contributionAmount, allocation.currency)}</strong>
+          {previewRows.map((allocation, index) => (
+            <div className="review-preview-row" key={`${allocation.partnerName}-${index}`}>
+              <span>{allocation.partnerName}</span>
+              <strong>{allocation.commitmentPercentage?.toFixed(2) ?? "0.00"}%</strong>
             </div>
           ))}
         </div>
+      ) : null}
+      {capitalCallReviewPayload?.reviewDownloadRoute ? (
+        <button
+          className="secondary-button review-download-button"
+          type="button"
+          onClick={() => {
+            const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+            window.open(new URL(capitalCallReviewPayload.reviewDownloadRoute!, baseUrl).toString(), "_blank", "noopener,noreferrer");
+          }}
+        >
+          Download Review Workbook
+          {capitalCallReviewPayload.reviewFileName ? `: ${capitalCallReviewPayload.reviewFileName}` : ""}
+        </button>
       ) : null}
       <div className="review-actions">
         <button className="secondary-button" type="button" onClick={onReject}>
           Reject
         </button>
-        <button className="primary-button review-approve-button" type="button" onClick={onApprove}>
-          {approveLabel}
+        <button className="primary-button review-approve-button" type="button" onClick={handlePrimaryAction}>
+          {primaryLabel}
         </button>
       </div>
-      <pre>{task.proposedPayloadJson}</pre>
+      {isEditable ? (
+        <>
+          <textarea
+            className="review-payload-editor"
+            value={draftPayload}
+            onChange={(event) => setDraftPayload(event.target.value)}
+            spellCheck={false}
+            rows={14}
+          />
+          {payloadError ? <p className="review-error">{payloadError}</p> : null}
+        </>
+      ) : (
+        <pre>{task.proposedPayloadJson}</pre>
+      )}
     </article>
   );
+
+  function onReject() {
+    onSubmit("Rejected", isEditable ? draftPayload : task.proposedPayloadJson, "Rejected from the review queue.");
+  }
 }
 
 function MessageCard({
   message,
   operations,
+  onAction,
 }: {
   message: ConversationMessage;
   operations: AgentOperation[];
+  onAction: (action: AgentAction) => void | Promise<void>;
 }) {
   const operation = operations.find((candidate) => candidate.id === message.operationId);
 
@@ -592,17 +742,7 @@ function MessageCard({
               key={`${message.id}-${action.label}`}
               type="button"
               className={`action-chip tone-${actionTone(action.type)}`}
-              onClick={() => {
-                if (action.route) {
-                  if (action.route.startsWith("/api/")) {
-                    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
-                    window.open(new URL(action.route, baseUrl).toString(), "_blank", "noopener,noreferrer");
-                    return;
-                  }
-
-                  window.alert(`Open route: ${action.route}`);
-                }
-              }}
+              onClick={() => void onAction(action)}
             >
               {action.label}
             </button>

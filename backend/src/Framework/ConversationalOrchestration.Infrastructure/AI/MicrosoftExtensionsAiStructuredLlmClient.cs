@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Infrastructure.Configuration;
 using Microsoft.Extensions.AI;
@@ -15,7 +16,8 @@ public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmCli
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
     };
 
     private readonly ConcurrentDictionary<LlmProfile, IChatClient> _chatClients = new();
@@ -46,24 +48,33 @@ public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmCli
         try
         {
             var client = _chatClients.GetOrAdd(request.Profile, _ => CreateChatClient(options, model));
-            var response = await client.GetResponseAsync(
-                [
+            var messages =
+                new[]
+                {
                     new ChatMessage(ChatRole.System, request.SystemPrompt),
                     new ChatMessage(ChatRole.User, request.UserPrompt)
-                ],
-                new ChatOptions
-                {
-                    ResponseFormat = ChatResponseFormat.Json
-                },
+                };
+
+            var structuredResult = await TryGetStructuredResponseAsync<TResponse>(
+                client,
+                messages,
+                useJsonSchemaResponseFormat: true,
                 cancellationToken);
 
-            if (string.IsNullOrWhiteSpace(response.Text))
+            if (structuredResult is not null)
             {
-                _logger.LogWarning("LLM gateway returned an empty response for profile {Profile}.", request.Profile);
-                return null;
+                return structuredResult;
             }
 
-            return JsonSerializer.Deserialize<TResponse>(response.Text, JsonOptions);
+            _logger.LogWarning(
+                "Schema-based structured output did not yield a usable result for profile {Profile}. Falling back to non-schema JSON mode.",
+                request.Profile);
+
+            return await TryGetStructuredResponseAsync<TResponse>(
+                client,
+                messages,
+                useJsonSchemaResponseFormat: false,
+                cancellationToken);
         }
         catch (Exception exception)
         {
@@ -110,4 +121,56 @@ public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmCli
             LlmProfile.InputCompletion => options.InputCompletionModel,
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported LLM profile.")
         };
+
+    private async Task<TResponse?> TryGetStructuredResponseAsync<TResponse>(
+        IChatClient client,
+        IReadOnlyCollection<ChatMessage> messages,
+        bool useJsonSchemaResponseFormat,
+        CancellationToken cancellationToken)
+        where TResponse : class
+    {
+        try
+        {
+            var response = await client.GetResponseAsync<TResponse>(
+                messages,
+                JsonOptions,
+                options: null,
+                useJsonSchemaResponseFormat: useJsonSchemaResponseFormat,
+                cancellationToken: cancellationToken);
+
+            if (response.TryGetResult(out var result) && result is not null)
+            {
+                return result;
+            }
+
+            _logger.LogWarning(
+                "Structured output response could not be parsed for schema mode {UseJsonSchemaResponseFormat}. Response preview: {ResponsePreview}",
+                useJsonSchemaResponseFormat,
+                Truncate(response.Text));
+            return null;
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Structured output response failed deserialization for schema mode {UseJsonSchemaResponseFormat}.",
+                useJsonSchemaResponseFormat);
+            return null;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Structured output request failed for schema mode {UseJsonSchemaResponseFormat}.",
+                useJsonSchemaResponseFormat);
+            return null;
+        }
+    }
+
+    private static string Truncate(string? responseText) =>
+        string.IsNullOrWhiteSpace(responseText)
+            ? "(empty)"
+            : responseText.Length <= 500
+                ? responseText
+                : responseText[..500];
 }

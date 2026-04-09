@@ -1,4 +1,7 @@
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace ConversationalOrchestration.FundAdministration.CapitalCalls;
 
@@ -26,6 +29,7 @@ public sealed class CapitalCallIntentPatch
     public string? FundName { get; set; }
     public decimal? CapitalCallAmount { get; set; }
     public string? NoticeDate { get; set; }
+    [JsonConverter(typeof(SingleOrArrayJsonConverter<CapitalCallPartnerOverride>))]
     public List<CapitalCallPartnerOverride> PartnerOverrides { get; set; } = [];
 }
 
@@ -38,6 +42,7 @@ public sealed class CapitalCallRequestState
     public string? FundName { get; set; }
     public decimal? CapitalCallAmount { get; set; }
     public string? NoticeDate { get; set; }
+    [JsonConverter(typeof(SingleOrArrayJsonConverter<CapitalCallPartnerOverride>))]
     public List<CapitalCallPartnerOverride> PartnerOverrides { get; set; } = [];
 }
 
@@ -50,6 +55,12 @@ public sealed class CapitalCallPreparationResult
     public string Summary { get; set; } = string.Empty;
 }
 
+public sealed class CapitalCallProviderConfiguration
+{
+    public CapitalCallExecutionProfile? Profile { get; init; }
+    public string? ProviderName { get; init; }
+}
+
 public sealed class CapitalCallWorkflowStart
 {
     public string TenantId { get; init; } = string.Empty;
@@ -60,13 +71,20 @@ public sealed class CapitalCallWorkflowStart
     public string RequestStateJson { get; init; } = "{}";
 }
 
-public sealed class CapitalCallMaterializationResult
+public sealed class CapitalCallReviewArtifactResult
 {
-    public string ResultKind { get; set; } = string.Empty;
+    public string FileAssetId { get; set; } = string.Empty;
+    public string DownloadRoute { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+}
+
+public sealed class TemplateOutputGenerationResult
+{
+    public string FileAssetId { get; set; } = string.Empty;
+    public string DownloadRoute { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
-    public string? Route { get; set; }
-    public string? FileAssetId { get; set; }
-    public string? DownloadRoute { get; set; }
+    public string SourceOperationId { get; set; } = string.Empty;
 }
 
 public sealed class CapitalCallOperationData
@@ -76,10 +94,42 @@ public sealed class CapitalCallOperationData
     public decimal CapitalCallAmount { get; set; }
     public string RootCurrency { get; set; } = string.Empty;
     public string? RequestStateJson { get; set; }
+    public string? ReviewedExtractionJson { get; set; }
     public string NoticeDtoJson { get; set; } = "{}";
-    public string? DraftRoute { get; set; }
-    public string? FileAssetId { get; set; }
-    public string? DownloadRoute { get; set; }
+    public string? ReviewFileAssetId { get; set; }
+    public string? ReviewDownloadRoute { get; set; }
+    public string? ReviewFileName { get; set; }
+}
+
+public sealed class CapitalCallExtractionReviewPayload
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string ConversationId { get; set; } = string.Empty;
+    public string OperationId { get; set; } = string.Empty;
+    public string RequestStateJson { get; set; } = "{}";
+    public CapitalCallReviewFundNode RootFund { get; set; } = new();
+    public string? ReviewFileAssetId { get; set; }
+    public string? ReviewDownloadRoute { get; set; }
+    public string? ReviewFileName { get; set; }
+}
+
+public sealed class CapitalCallReviewFundNode
+{
+    public string FundId { get; set; } = string.Empty;
+    public string FundName { get; set; } = string.Empty;
+    public string FundCurrency { get; set; } = string.Empty;
+    public string Path { get; set; } = string.Empty;
+    public List<CapitalCallReviewPartnerNode> Partners { get; set; } = [];
+}
+
+public sealed class CapitalCallReviewPartnerNode
+{
+    public string PartnerId { get; set; } = string.Empty;
+    public string PartnerName { get; set; } = string.Empty;
+    public string PartnerType { get; set; } = string.Empty;
+    public string PartnerCurrency { get; set; } = string.Empty;
+    public decimal CommitmentPercentage { get; set; }
+    public CapitalCallReviewFundNode? ChildFund { get; set; }
 }
 
 public sealed class CapitalCallFundSnapshot
@@ -160,4 +210,46 @@ public static class CapitalCallFormatting
 {
     public static string FormatAmount(decimal value, string currency) =>
         string.Create(CultureInfo.InvariantCulture, $"{currency} {value:N2}");
+}
+
+internal sealed class SingleOrArrayJsonConverter<TItem> : JsonConverter<List<TItem>>
+{
+    public override List<TItem> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return [];
+        }
+
+        if (reader.TokenType == JsonTokenType.StartArray)
+        {
+            return JsonSerializer.Deserialize<List<TItem>>(ref reader, options) ?? [];
+        }
+
+        if (reader.TokenType == JsonTokenType.StartObject)
+        {
+            var item = JsonSerializer.Deserialize<TItem>(ref reader, options);
+            return item is null ? [] : [item];
+        }
+
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var raw = reader.GetString();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return [];
+            }
+
+            using var document = JsonDocument.Parse(raw);
+            var nestedJson = Encoding.UTF8.GetBytes(document.RootElement.GetRawText());
+            var nestedReader = new Utf8JsonReader(nestedJson);
+            nestedReader.Read();
+            return Read(ref nestedReader, typeToConvert, options);
+        }
+
+        throw new JsonException($"Unsupported JSON token '{reader.TokenType}' for {typeof(TItem).Name} collection.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<TItem> value, JsonSerializerOptions options) =>
+        JsonSerializer.Serialize(writer, value, options);
 }

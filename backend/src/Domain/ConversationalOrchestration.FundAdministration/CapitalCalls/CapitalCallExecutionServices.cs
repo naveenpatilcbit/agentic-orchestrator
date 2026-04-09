@@ -24,18 +24,48 @@ public interface ICapitalCallAllocationEngine
     Task<CapitalCallComputationResult> ComputeAsync(
         string tenantId,
         string conversationId,
-        string requestStateJson,
+        string reviewedExtractionJson,
         CancellationToken cancellationToken);
 }
 
-public interface ICapitalCallResultMaterializer
+public interface ICapitalCallReviewArtifactService
 {
-    Task<CapitalCallMaterializationResult> MaterializeAsync(
+    Task<CapitalCallReviewArtifactResult> CreateAsync(
+        string tenantId,
+        string conversationId,
+        string operationId,
+        string extractionReviewPayloadJson,
+        CancellationToken cancellationToken);
+}
+
+public interface ICapitalCallExtractionReviewService
+{
+    Task<CapitalCallExtractionReviewPayload> BuildAsync(
         string tenantId,
         string conversationId,
         string operationId,
         string requestStateJson,
-        string noticeDtoJson,
+        CancellationToken cancellationToken);
+}
+
+public interface ITemplateOutputGenerationService
+{
+    Task<TemplateOutputGenerationResult> GenerateAsync(
+        string tenantId,
+        string conversationId,
+        string sourceOperationId,
+        string? templateName,
+        CancellationToken cancellationToken);
+}
+
+public interface ITemplateOutputSourceHandler
+{
+    bool CanHandle(AgentOperation sourceOperation);
+
+    Task<TemplateOutputGenerationResult> GenerateAsync(
+        AgentOperation sourceOperation,
+        string conversationId,
+        string? templateName,
         CancellationToken cancellationToken);
 }
 
@@ -459,39 +489,28 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
     }
 }
 
-public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
+public sealed class CapitalCallExtractionReviewService : ICapitalCallExtractionReviewService
 {
     private readonly IReadOnlyCollection<ICapitalCallDataProvider> _dataProviders;
-    private readonly IFxRateProvider _fxRateProvider;
-    private readonly ILogger<CapitalCallAllocationEngine> _logger;
+    private readonly ILogger<CapitalCallExtractionReviewService> _logger;
 
-    public CapitalCallAllocationEngine(
+    public CapitalCallExtractionReviewService(
         IEnumerable<ICapitalCallDataProvider> dataProviders,
-        IFxRateProvider fxRateProvider,
-        ILogger<CapitalCallAllocationEngine> logger)
+        ILogger<CapitalCallExtractionReviewService> logger)
     {
         _dataProviders = dataProviders.ToArray();
-        _fxRateProvider = fxRateProvider;
         _logger = logger;
     }
 
-    public async Task<CapitalCallComputationResult> ComputeAsync(
+    public async Task<CapitalCallExtractionReviewPayload> BuildAsync(
         string tenantId,
         string conversationId,
+        string operationId,
         string requestStateJson,
         CancellationToken cancellationToken)
     {
         var state = JsonContent.Deserialize<CapitalCallRequestState>(requestStateJson)
             ?? throw new InvalidOperationException("Capital call request state is missing.");
-        _logger.LogInformation(
-            "Starting capital call allocation for tenant {TenantId} conversation {ConversationId}. Profile={Profile} FundId={FundId} FundName={FundName} Amount={Amount}",
-            tenantId,
-            conversationId,
-            state.Profile,
-            state.FundId,
-            state.FundName,
-            state.CapitalCallAmount);
-
         var provider = _dataProviders.FirstOrDefault(candidate => candidate.CanHandle(state.Profile))
             ?? throw new InvalidOperationException($"No capital call data provider is registered for profile '{state.Profile}'.");
         var rootFund = await provider.GetFundAsync(
@@ -501,30 +520,147 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             state.FundId ?? throw new InvalidOperationException("Capital call state is missing the resolved fund id."),
             cancellationToken)
             ?? throw new InvalidOperationException("The root fund could not be loaded.");
+
         _logger.LogInformation(
-            "Loaded root fund {FundId} ({FundName}) for capital call allocation in tenant {TenantId} conversation {ConversationId}. Currency={Currency}",
-            rootFund.FundId,
-            rootFund.FundName,
+            "Building capital call extraction review payload for tenant {TenantId} conversation {ConversationId} operation {OperationId}. RootFundId={FundId} FundName={FundName}",
             tenantId,
             conversationId,
-            rootFund.Currency);
+            operationId,
+            rootFund.FundId,
+            rootFund.FundName);
+
+        return new CapitalCallExtractionReviewPayload
+        {
+            TenantId = tenantId,
+            ConversationId = conversationId,
+            OperationId = operationId,
+            RequestStateJson = requestStateJson,
+            RootFund = await BuildFundNodeAsync(
+                provider,
+                state,
+                tenantId,
+                conversationId,
+                rootFund,
+                rootFund.FundName,
+                [],
+                0,
+                cancellationToken)
+        };
+    }
+
+    private async Task<CapitalCallReviewFundNode> BuildFundNodeAsync(
+        ICapitalCallDataProvider provider,
+        CapitalCallRequestState state,
+        string tenantId,
+        string conversationId,
+        CapitalCallFundSnapshot fund,
+        string path,
+        IReadOnlyCollection<string> fundPath,
+        int depth,
+        CancellationToken cancellationToken)
+    {
+        if (depth >= 10)
+        {
+            throw new InvalidOperationException($"Feeder depth exceeded the supported limit while extracting {fund.FundName}.");
+        }
+
+        if (fundPath.Contains(fund.FundId, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Detected a feeder cycle while extracting {fund.FundName}.");
+        }
+
+        var node = new CapitalCallReviewFundNode
+        {
+            FundId = fund.FundId,
+            FundName = fund.FundName,
+            FundCurrency = fund.Currency,
+            Path = path
+        };
+
+        foreach (var partner in fund.Partners.OrderBy(partner => partner.PartnerName, StringComparer.OrdinalIgnoreCase))
+        {
+            var partnerNode = new CapitalCallReviewPartnerNode
+            {
+                PartnerId = partner.PartnerId,
+                PartnerName = partner.PartnerName,
+                PartnerType = partner.Kind.ToString(),
+                PartnerCurrency = partner.Currency,
+                CommitmentPercentage = CapitalCallRequestPreparationService.ResolveCommitmentPercentage(partner, state)
+            };
+
+            if (partner.Kind == CapitalCallParticipantKind.FeederFund)
+            {
+                var childFund = await provider.GetFundAsync(
+                    tenantId,
+                    conversationId,
+                    state,
+                    partner.ChildFundId ?? throw new InvalidOperationException("Child fund id is missing."),
+                    cancellationToken)
+                    ?? throw new InvalidOperationException($"The child fund for {partner.PartnerName} could not be loaded.");
+
+                partnerNode.ChildFund = await BuildFundNodeAsync(
+                    provider,
+                    state,
+                    tenantId,
+                    conversationId,
+                    childFund,
+                    $"{path} -> {childFund.FundName}",
+                    [..fundPath, fund.FundId],
+                    depth + 1,
+                    cancellationToken);
+            }
+
+            node.Partners.Add(partnerNode);
+        }
+
+        return node;
+    }
+}
+
+public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
+{
+    private readonly IFxRateProvider _fxRateProvider;
+    private readonly ILogger<CapitalCallAllocationEngine> _logger;
+
+    public CapitalCallAllocationEngine(
+        IFxRateProvider fxRateProvider,
+        ILogger<CapitalCallAllocationEngine> logger)
+    {
+        _fxRateProvider = fxRateProvider;
+        _logger = logger;
+    }
+
+    public async Task<CapitalCallComputationResult> ComputeAsync(
+        string tenantId,
+        string conversationId,
+        string reviewedExtractionJson,
+        CancellationToken cancellationToken)
+    {
+        var reviewPayload = JsonContent.Deserialize<CapitalCallExtractionReviewPayload>(reviewedExtractionJson)
+            ?? throw new InvalidOperationException("Capital call extraction review payload is missing.");
+        var state = JsonContent.Deserialize<CapitalCallRequestState>(reviewPayload.RequestStateJson)
+            ?? throw new InvalidOperationException("Capital call request state is missing.");
+        _logger.LogInformation(
+            "Starting capital call allocation for tenant {TenantId} conversation {ConversationId}. RootFundId={FundId} FundName={FundName} Amount={Amount}",
+            tenantId,
+            conversationId,
+            reviewPayload.RootFund.FundId,
+            reviewPayload.RootFund.FundName,
+            state.CapitalCallAmount);
 
         var traversal = await ExpandFundAsync(
-            provider,
-            state,
             tenantId,
             conversationId,
-            rootFund,
+            reviewPayload.RootFund,
             state.CapitalCallAmount!.Value,
-            rootFund.FundName,
             [],
             0,
             cancellationToken);
 
         var notice = new CapitalCallNoticeDto
         {
-            RootFundName = rootFund.FundName,
-            RootCurrency = rootFund.Currency,
+            RootFundName = reviewPayload.RootFund.FundName,
+            RootCurrency = reviewPayload.RootFund.FundCurrency,
             RootCapitalCallAmount = state.CapitalCallAmount.Value,
             FundBreakdowns = traversal.FundBreakdowns,
             LeafAllocations = traversal.LeafAllocations
@@ -533,7 +669,7 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             "Completed capital call allocation for tenant {TenantId} conversation {ConversationId}. RootFundId={FundId} FundBreakdowns={FundBreakdownCount} LeafAllocations={LeafAllocationCount}",
             tenantId,
             conversationId,
-            rootFund.FundId,
+            reviewPayload.RootFund.FundId,
             notice.FundBreakdowns.Count,
             notice.LeafAllocations.Count);
 
@@ -541,20 +677,17 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
         {
             Notice = notice,
             NoticeDtoJson = JsonContent.Serialize(notice),
-            RootFundName = rootFund.FundName,
-            RootCurrency = rootFund.Currency,
+            RootFundName = reviewPayload.RootFund.FundName,
+            RootCurrency = reviewPayload.RootFund.FundCurrency,
             RootCapitalCallAmount = state.CapitalCallAmount.Value
         };
     }
 
     private async Task<CapitalCallTraversalResult> ExpandFundAsync(
-        ICapitalCallDataProvider provider,
-        CapitalCallRequestState state,
         string tenantId,
         string conversationId,
-        CapitalCallFundSnapshot fund,
+        CapitalCallReviewFundNode fund,
         decimal amountToRaise,
-        string path,
         IReadOnlyCollection<string> fundPath,
         int depth,
         CancellationToken cancellationToken)
@@ -567,7 +700,7 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
                 conversationId,
                 fund.FundId,
                 fund.FundName,
-                depth);
+            depth);
             throw new InvalidOperationException($"Feeder depth exceeded the supported limit while expanding {fund.FundName}.");
         }
 
@@ -588,9 +721,9 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             fund.FundId,
             fund.FundName,
             amountToRaise,
-            fund.Currency,
+            fund.FundCurrency,
             depth,
-            path);
+            fund.Path);
 
         var traversal = new CapitalCallTraversalResult();
         var sortedPartners = fund.Partners
@@ -602,8 +735,8 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             .Select(partner => new
             {
                 Partner = partner,
-                Percentage = CapitalCallRequestPreparationService.ResolveCommitmentPercentage(partner, state),
-                RawAmount = amountToRaise * (CapitalCallRequestPreparationService.ResolveCommitmentPercentage(partner, state) / 100m)
+                Percentage = partner.CommitmentPercentage,
+                RawAmount = amountToRaise * (partner.CommitmentPercentage / 100m)
             })
             .ToArray();
 
@@ -629,20 +762,15 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
 
         foreach (var allocation in roundedAllocations)
         {
-            if (allocation.Partner.Kind == CapitalCallParticipantKind.FeederFund)
+            if (string.Equals(allocation.Partner.PartnerType, CapitalCallParticipantKind.FeederFund.ToString(), StringComparison.OrdinalIgnoreCase))
             {
-                var childFund = await provider.GetFundAsync(
-                    tenantId,
-                    conversationId,
-                    state,
-                    allocation.Partner.ChildFundId ?? throw new InvalidOperationException("Child fund id is missing."),
-                    cancellationToken)
+                var childFund = allocation.Partner.ChildFund
                     ?? throw new InvalidOperationException($"The child fund for {allocation.Partner.PartnerName} could not be loaded.");
 
                 var childAmount = await _fxRateProvider.ConvertAsync(
                     allocation.Amount,
-                    fund.Currency,
-                    childFund.Currency,
+                    fund.FundCurrency,
+                    childFund.FundCurrency,
                     cancellationToken);
                 _logger.LogInformation(
                     "Converted feeder allocation across fund boundary for tenant {TenantId} conversation {ConversationId}. ParentFundId={ParentFundId} ChildFundId={ChildFundId} PartnerName={PartnerName} ParentAmount={ParentAmount} ParentCurrency={ParentCurrency} ChildAmount={ChildAmount} ChildCurrency={ChildCurrency}",
@@ -652,31 +780,27 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
                     childFund.FundId,
                     allocation.Partner.PartnerName,
                     allocation.Amount,
-                    fund.Currency,
+                    fund.FundCurrency,
                     childAmount,
-                    childFund.Currency);
+                    childFund.FundCurrency);
 
                 partnerAllocations.Add(new CapitalCallPartnerAllocation
                 {
                     PartnerName = allocation.Partner.PartnerName,
                     PartnerType = CapitalCallParticipantKind.FeederFund.ToString(),
-                    PartnerCurrency = allocation.Partner.Currency,
+                    PartnerCurrency = allocation.Partner.PartnerCurrency,
                     CommitmentPercentage = allocation.Percentage,
                     ContributionAmount = allocation.Amount,
                     ChildFundId = childFund.FundId,
                     ChildFundName = childFund.FundName,
-                    ChildFundCurrency = childFund.Currency
+                    ChildFundCurrency = childFund.FundCurrency
                 });
 
-                var childPath = $"{path} -> {childFund.FundName}";
                 var childTraversal = await ExpandFundAsync(
-                    provider,
-                    state,
                     tenantId,
                     conversationId,
                     childFund,
                     childAmount,
-                    childPath,
                     [..fundPath, fund.FundId],
                     depth + 1,
                     cancellationToken);
@@ -690,17 +814,17 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             {
                 PartnerName = allocation.Partner.PartnerName,
                 PartnerType = CapitalCallParticipantKind.Investor.ToString(),
-                PartnerCurrency = allocation.Partner.Currency,
+                PartnerCurrency = allocation.Partner.PartnerCurrency,
                 CommitmentPercentage = allocation.Percentage,
                 ContributionAmount = allocation.Amount
             });
 
             traversal.LeafAllocations.Add(new CapitalCallLeafAllocation
             {
-                Path = $"{path} -> {allocation.Partner.PartnerName}",
-                ParentFundPath = path,
+                Path = $"{fund.Path} -> {allocation.Partner.PartnerName}",
+                ParentFundPath = fund.Path,
                 InvestorName = allocation.Partner.PartnerName,
-                Currency = allocation.Amount > 0 ? fund.Currency : allocation.Partner.Currency,
+                Currency = fund.FundCurrency,
                 CommitmentPercentage = allocation.Percentage,
                 ContributionAmount = allocation.Amount
             });
@@ -710,8 +834,8 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
         {
             FundId = fund.FundId,
             FundName = fund.FundName,
-            FundCurrency = fund.Currency,
-            Path = path,
+            FundCurrency = fund.FundCurrency,
+            Path = fund.Path,
             AmountToRaise = decimal.Round(amountToRaise, 2, MidpointRounding.AwayFromZero),
             PartnerAllocations = partnerAllocations
         });
@@ -728,90 +852,207 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
     }
 }
 
-public sealed class CapitalCallResultMaterializer : ICapitalCallResultMaterializer
+public sealed class CapitalCallReviewArtifactService : ICapitalCallReviewArtifactService
 {
     private const string ExcelContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-    private readonly IAgentOperationRepository _agentOperationRepository;
     private readonly IFileStorageService _fileStorageService;
-    private readonly ILogger<CapitalCallResultMaterializer> _logger;
+    private readonly ILogger<CapitalCallReviewArtifactService> _logger;
 
-    public CapitalCallResultMaterializer(
-        IAgentOperationRepository agentOperationRepository,
+    public CapitalCallReviewArtifactService(
         IFileStorageService fileStorageService,
-        ILogger<CapitalCallResultMaterializer> logger)
+        ILogger<CapitalCallReviewArtifactService> logger)
     {
-        _agentOperationRepository = agentOperationRepository;
         _fileStorageService = fileStorageService;
         _logger = logger;
     }
 
-    public async Task<CapitalCallMaterializationResult> MaterializeAsync(
+    public async Task<CapitalCallReviewArtifactResult> CreateAsync(
         string tenantId,
         string conversationId,
         string operationId,
-        string requestStateJson,
-        string noticeDtoJson,
+        string extractionReviewPayloadJson,
         CancellationToken cancellationToken)
     {
-        var state = JsonContent.Deserialize<CapitalCallRequestState>(requestStateJson)
-            ?? throw new InvalidOperationException("Capital call state could not be loaded.");
-        var notice = JsonContent.Deserialize<CapitalCallNoticeDto>(noticeDtoJson)
-            ?? throw new InvalidOperationException("Capital call DTO could not be loaded.");
-        var operation = await _agentOperationRepository.GetAsync(operationId, tenantId, cancellationToken)
-            ?? throw new InvalidOperationException($"Operation '{operationId}' could not be found.");
-        _logger.LogInformation(
-            "Materializing capital call result for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Profile={Profile} FundName={FundName}",
-            tenantId,
-            conversationId,
-            operationId,
-            state.Profile,
-            notice.RootFundName);
+        var reviewPayload = JsonContent.Deserialize<CapitalCallExtractionReviewPayload>(extractionReviewPayloadJson)
+            ?? throw new InvalidOperationException("Capital call extraction review payload could not be loaded for review artifact creation.");
 
-        await using var stream = BuildWorkbookStream(notice);
+        await using var stream = CapitalCallWorkbookBuilder.BuildExtractionReviewWorkbookStream(reviewPayload);
+        var fileName = BuildReviewFileName(reviewPayload.RootFund.FundName);
         var file = await _fileStorageService.SaveAsync(
             stream,
-            $"{Slugify(notice.RootFundName)}-capital-call-output.xlsx",
+            fileName,
             ExcelContentType,
             conversationId,
-            new TenantExecutionContext(tenantId, "workflow", "Capital Call Workflow"),
+            new TenantExecutionContext(tenantId, "workflow", "Capital Call Review Artifact"),
             cancellationToken);
 
         var downloadRoute = $"/api/files/{file.Id}/download";
-        operation.Title = $"Capital Call Output for {notice.RootFundName}";
-        operation.Status = AgentOperationStatus.Completed;
-        operation.CurrentStep = "ExcelReady";
-        operation.PendingClarification = null;
-        operation.ActiveReviewTaskId = null;
-        operation.Summary = $"Reviewed allocations for {notice.RootFundName} and generated a downloadable Excel file.";
-        operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
+        _logger.LogInformation(
+            "Generated capital call review workbook for tenant {TenantId} conversation {ConversationId} operation {OperationId}. FileAssetId={FileAssetId}",
+            tenantId,
+            conversationId,
+            operationId,
+            file.Id);
+
+        return new CapitalCallReviewArtifactResult
         {
-            Profile = state.Profile.ToString(),
-            FundName = notice.RootFundName,
-            CapitalCallAmount = notice.RootCapitalCallAmount,
-            RootCurrency = notice.RootCurrency,
             FileAssetId = file.Id,
             DownloadRoute = downloadRoute,
-            NoticeDtoJson = noticeDtoJson
-        });
-        await _agentOperationRepository.UpsertAsync(operation, cancellationToken);
-        _logger.LogInformation(
-            "Generated capital call output artifact for tenant {TenantId} operation {OperationId}. FileAssetId={FileAssetId} DownloadRoute={DownloadRoute}",
-            tenantId,
-            operationId,
-            file.Id,
-            downloadRoute);
-
-        return new CapitalCallMaterializationResult
-        {
-            ResultKind = "Artifact",
-            Summary = operation.Summary,
-            FileAssetId = file.Id,
-            DownloadRoute = downloadRoute
+            FileName = file.FileName
         };
     }
 
-    private static MemoryStream BuildWorkbookStream(CapitalCallNoticeDto notice)
+    internal static string BuildReviewFileName(string fundName) =>
+        $"{CapitalCallFileNameSupport.BuildSlug(fundName)}-capital-call-review.xlsx";
+}
+
+public sealed class TemplateOutputGenerationService : ITemplateOutputGenerationService
+{
+    private readonly IAgentOperationRepository _agentOperationRepository;
+    private readonly IReadOnlyCollection<ITemplateOutputSourceHandler> _sourceHandlers;
+    private readonly ILogger<TemplateOutputGenerationService> _logger;
+
+    public TemplateOutputGenerationService(
+        IAgentOperationRepository agentOperationRepository,
+        IEnumerable<ITemplateOutputSourceHandler> sourceHandlers,
+        ILogger<TemplateOutputGenerationService> logger)
+    {
+        _agentOperationRepository = agentOperationRepository;
+        _sourceHandlers = sourceHandlers.ToArray();
+        _logger = logger;
+    }
+
+    public async Task<TemplateOutputGenerationResult> GenerateAsync(
+        string tenantId,
+        string conversationId,
+        string sourceOperationId,
+        string? templateName,
+        CancellationToken cancellationToken)
+    {
+        var sourceOperation = await _agentOperationRepository.GetAsync(sourceOperationId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException($"Source operation '{sourceOperationId}' could not be found.");
+
+        var handler = _sourceHandlers.FirstOrDefault(candidate => candidate.CanHandle(sourceOperation))
+            ?? throw new InvalidOperationException($"No template output handler is registered for source agent '{sourceOperation.AgentId}'.");
+
+        _logger.LogInformation(
+            "Generating template output for tenant {TenantId}. SourceOperationId={SourceOperationId} SourceAgentId={SourceAgentId} TemplateName={TemplateName}",
+            tenantId,
+            sourceOperationId,
+            sourceOperation.AgentId,
+            templateName);
+
+        return await handler.GenerateAsync(sourceOperation, conversationId, templateName, cancellationToken);
+    }
+}
+
+public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSourceHandler
+{
+    private const string ExcelContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+    private readonly IFileStorageService _fileStorageService;
+    private readonly ILogger<CapitalCallTemplateOutputSourceHandler> _logger;
+
+    public CapitalCallTemplateOutputSourceHandler(
+        IFileStorageService fileStorageService,
+        ILogger<CapitalCallTemplateOutputSourceHandler> logger)
+    {
+        _fileStorageService = fileStorageService;
+        _logger = logger;
+    }
+
+    public bool CanHandle(AgentOperation sourceOperation) =>
+        string.Equals(sourceOperation.AgentId, FundAdministration.Agents.FundAdministrationAgentIds.NoticeCreation, StringComparison.Ordinal);
+
+    public async Task<TemplateOutputGenerationResult> GenerateAsync(
+        AgentOperation sourceOperation,
+        string conversationId,
+        string? templateName,
+        CancellationToken cancellationToken)
+    {
+        var data = JsonContent.Deserialize<CapitalCallOperationData>(sourceOperation.DataJson)
+            ?? throw new InvalidOperationException("The source capital call operation does not contain any approved allocation data.");
+        var notice = JsonContent.Deserialize<CapitalCallNoticeDto>(data.NoticeDtoJson)
+            ?? throw new InvalidOperationException("The source capital call operation does not contain a valid reviewed capital call payload.");
+
+        await using var stream = CapitalCallWorkbookBuilder.BuildWorkbookStream(notice);
+        var fileName = BuildTemplateOutputFileName(notice.RootFundName, templateName);
+        var file = await _fileStorageService.SaveAsync(
+            stream,
+            fileName,
+            ExcelContentType,
+            conversationId,
+            new TenantExecutionContext(sourceOperation.TenantId, "workflow", "Template Output Operation"),
+            cancellationToken);
+
+        var downloadRoute = $"/api/files/{file.Id}/download";
+        _logger.LogInformation(
+            "Generated template output workbook from capital call source operation {SourceOperationId}. FileAssetId={FileAssetId} TemplateName={TemplateName}",
+            sourceOperation.Id,
+            file.Id,
+            templateName);
+
+        return new TemplateOutputGenerationResult
+        {
+            FileAssetId = file.Id,
+            DownloadRoute = downloadRoute,
+            FileName = file.FileName,
+            SourceOperationId = sourceOperation.Id,
+            Summary = string.IsNullOrWhiteSpace(templateName)
+                ? $"Generated a reusable template output workbook from the approved capital call allocations for {notice.RootFundName}."
+                : $"Generated the '{templateName}' template output workbook from the approved capital call allocations for {notice.RootFundName}."
+        };
+    }
+
+    private static string BuildTemplateOutputFileName(string fundName, string? templateName)
+    {
+        var templateSlug = string.IsNullOrWhiteSpace(templateName)
+            ? "template-output"
+            : CapitalCallFileNameSupport.BuildSlug(templateName);
+
+        return $"{CapitalCallFileNameSupport.BuildSlug(fundName)}-{templateSlug}.xlsx";
+    }
+}
+
+internal static class CapitalCallWorkbookBuilder
+{
+    public static MemoryStream BuildExtractionReviewWorkbookStream(CapitalCallExtractionReviewPayload reviewPayload)
+    {
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.Worksheets.Add("Extracted Partner Data");
+
+        sheet.Cell(1, 1).Value = "Fund Path";
+        sheet.Cell(1, 2).Value = "Fund Name";
+        sheet.Cell(1, 3).Value = "Fund Currency";
+        sheet.Cell(1, 4).Value = "Partner Name";
+        sheet.Cell(1, 5).Value = "Partner Type";
+        sheet.Cell(1, 6).Value = "Partner Currency";
+        sheet.Cell(1, 7).Value = "Commitment Percentage";
+        sheet.Cell(1, 8).Value = "Child Fund Name";
+
+        var row = 2;
+        foreach (var entry in FlattenReviewRows(reviewPayload.RootFund))
+        {
+            sheet.Cell(row, 1).Value = entry.FundPath;
+            sheet.Cell(row, 2).Value = entry.FundName;
+            sheet.Cell(row, 3).Value = entry.FundCurrency;
+            sheet.Cell(row, 4).Value = entry.PartnerName;
+            sheet.Cell(row, 5).Value = entry.PartnerType;
+            sheet.Cell(row, 6).Value = entry.PartnerCurrency;
+            sheet.Cell(row, 7).Value = entry.CommitmentPercentage;
+            sheet.Cell(row, 8).Value = entry.ChildFundName ?? string.Empty;
+            row++;
+        }
+
+        StyleWorksheet(sheet, 8);
+        var stream = new MemoryStream();
+        workbook.SaveAs(stream);
+        stream.Position = 0;
+        return stream;
+    }
+
+    public static MemoryStream BuildWorkbookStream(CapitalCallNoticeDto notice)
     {
         using var workbook = new XLWorkbook();
         var fundSheet = workbook.Worksheets.Add("Fund Rollups");
@@ -897,7 +1138,44 @@ public sealed class CapitalCallResultMaterializer : ICapitalCallResultMaterializ
         }
     }
 
-    private static string Slugify(string input)
+    private static IEnumerable<ReviewWorkbookRow> FlattenReviewRows(CapitalCallReviewFundNode fund)
+    {
+        foreach (var partner in fund.Partners)
+        {
+            yield return new ReviewWorkbookRow(
+                fund.Path,
+                fund.FundName,
+                fund.FundCurrency,
+                partner.PartnerName,
+                partner.PartnerType,
+                partner.PartnerCurrency,
+                partner.CommitmentPercentage,
+                partner.ChildFund?.FundName);
+
+            if (partner.ChildFund is not null)
+            {
+                foreach (var childRow in FlattenReviewRows(partner.ChildFund))
+                {
+                    yield return childRow;
+                }
+            }
+        }
+    }
+
+    private sealed record ReviewWorkbookRow(
+        string FundPath,
+        string FundName,
+        string FundCurrency,
+        string PartnerName,
+        string PartnerType,
+        string PartnerCurrency,
+        decimal CommitmentPercentage,
+        string? ChildFundName);
+}
+
+internal static class CapitalCallFileNameSupport
+{
+    public static string BuildSlug(string input)
     {
         var letters = input
             .ToLowerInvariant()

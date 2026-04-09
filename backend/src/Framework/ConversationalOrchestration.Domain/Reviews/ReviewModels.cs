@@ -8,6 +8,12 @@ public enum ReviewTaskStatus
     NeedsChanges = 4
 }
 
+public enum ReviewTaskInteractionMode
+{
+    ApproveReject = 1,
+    EditAndSubmit = 2
+}
+
 public sealed class ReviewTask
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -17,6 +23,8 @@ public sealed class ReviewTask
     public string Title { get; set; } = string.Empty;
     public string TaskType { get; set; } = string.Empty;
     public string? WorkflowPendingRequestId { get; set; }
+    public ReviewTaskInteractionMode InteractionMode { get; set; } = ReviewTaskInteractionMode.ApproveReject;
+    public string? InstructionText { get; set; }
     public string ProposedPayloadJson { get; set; } = string.Empty;
     public string? FinalPayloadJson { get; set; }
     public string? Notes { get; set; }

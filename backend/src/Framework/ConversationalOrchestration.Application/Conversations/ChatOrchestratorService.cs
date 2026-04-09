@@ -6,6 +6,7 @@ using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using Microsoft.Extensions.Logging;
 
 namespace ConversationalOrchestration.Application.Conversations;
 
@@ -21,6 +22,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     private readonly IAgentCatalog _agentCatalog;
     private readonly IReviewTaskService _reviewTaskService;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
+    private readonly ILogger<ChatOrchestratorService> _logger;
 
     public ChatOrchestratorService(
         IConversationRepository conversationRepository,
@@ -32,7 +34,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         IMessageRoutingService routingService,
         IAgentCatalog agentCatalog,
         IReviewTaskService reviewTaskService,
-        IConversationHistoryCompactionService conversationHistoryCompactionService)
+        IConversationHistoryCompactionService conversationHistoryCompactionService,
+        ILogger<ChatOrchestratorService> logger)
     {
         _conversationRepository = conversationRepository;
         _conversationMessageRepository = conversationMessageRepository;
@@ -44,6 +47,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         _agentCatalog = agentCatalog;
         _reviewTaskService = reviewTaskService;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
+        _logger = logger;
     }
 
     public async Task<ConversationSnapshotResponse> HandleMessageAsync(
@@ -53,6 +57,13 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     {
         var conversation = await GetOrCreateConversationAsync(request.ConversationId, request.Message, context, cancellationToken);
         var attachments = await LoadAttachmentsAsync(request.AttachmentIds, context, cancellationToken);
+        _logger.LogInformation(
+            "Handling chat message for tenant {TenantId} conversation {ConversationId}. RequestedConversationId={RequestedConversationId} Attachments={AttachmentCount} MessageLength={MessageLength}",
+            context.TenantId,
+            conversation.Id,
+            request.ConversationId,
+            attachments.Count,
+            request.Message.Length);
 
         var userMessage = new ConversationMessage
         {
@@ -69,6 +80,15 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var routingDecision = await _routingService.DecideAsync(request.Message, conversation, operations, reviewTasks, attachments, cancellationToken);
+        _logger.LogInformation(
+            "Routing decision {DecisionType} selected for tenant {TenantId} conversation {ConversationId}. AgentId={AgentId} OperationId={OperationId} ReviewTaskId={ReviewTaskId} Explanation={Explanation}",
+            routingDecision.Type,
+            context.TenantId,
+            conversation.Id,
+            routingDecision.AgentId,
+            routingDecision.OperationId,
+            routingDecision.ReviewTaskId,
+            routingDecision.Explanation);
 
         switch (routingDecision.Type)
         {
@@ -187,6 +207,12 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         };
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
+        _logger.LogInformation(
+            "Starting new operation {OperationId} using agent {AgentId} for tenant {TenantId} conversation {ConversationId}.",
+            operation.Id,
+            agent.Definition.Id,
+            context.TenantId,
+            conversation.Id);
         conversation.LastFocusedOperationId = operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
@@ -206,11 +232,24 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         var operation = await _operationRepository.GetAsync(routingDecision.OperationId!, context.TenantId, cancellationToken);
         if (operation is null)
         {
+            _logger.LogWarning(
+                "Routing attempted to continue missing operation {OperationId} for tenant {TenantId} conversation {ConversationId}.",
+                routingDecision.OperationId,
+                context.TenantId,
+                conversation.Id);
             await AddAssistantMessageAsync(conversation.Id, context, "I couldn't find that operation anymore, so please restate the request and I'll start a fresh one.", null, "routing");
             return;
         }
 
         var agent = _agentCatalog.Resolve(operation.AgentId);
+        _logger.LogInformation(
+            "Continuing operation {OperationId} using agent {AgentId} for tenant {TenantId} conversation {ConversationId}. Status={Status} Step={CurrentStep}",
+            operation.Id,
+            operation.AgentId,
+            context.TenantId,
+            conversation.Id,
+            operation.Status,
+            operation.CurrentStep);
         conversation.LastFocusedOperationId = operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
@@ -225,6 +264,11 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Handling review chat response for tenant {TenantId}. ReviewTaskId={ReviewTaskId} OperationId={OperationId}",
+            context.TenantId,
+            routingDecision.ReviewTaskId,
+            routingDecision.OperationId);
         var result = await _reviewTaskService.HandleChatDecisionAsync(routingDecision, message, context, cancellationToken);
         if (!string.IsNullOrWhiteSpace(result.ConversationId))
         {
@@ -238,6 +282,11 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Handling status request for tenant {TenantId} conversation {ConversationId}. OperationId={OperationId}",
+            context.TenantId,
+            conversation.Id,
+            routingDecision.OperationId);
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
 
@@ -281,6 +330,14 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     {
         result.Operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _operationRepository.UpsertAsync(result.Operation, cancellationToken);
+        _logger.LogInformation(
+            "Persisted agent result for operation {OperationId} in tenant {TenantId} conversation {ConversationId}. Status={Status} Step={CurrentStep} Actions={ActionCount}",
+            result.Operation.Id,
+            context.TenantId,
+            conversation.Id,
+            result.Operation.Status,
+            result.Operation.CurrentStep,
+            result.Actions?.Count ?? 0);
 
         conversation.LastFocusedOperationId = result.Operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -326,6 +383,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
 
                 existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 await _conversationRepository.UpsertAsync(existing, cancellationToken);
+                _logger.LogDebug(
+                    "Resolved existing conversation {ConversationId} for tenant {TenantId}.",
+                    existing.Id,
+                    context.TenantId);
                 return existing;
             }
         }
@@ -338,6 +399,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         };
 
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
+        _logger.LogInformation(
+            "Created conversation {ConversationId} for tenant {TenantId}.",
+            conversation.Id,
+            context.TenantId);
         return conversation;
     }
 
@@ -354,7 +419,17 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             return Array.Empty<FileAsset>();
         }
 
-        return await _fileAssetRepository.ListByIdsAsync(attachmentIds, context.TenantId, cancellationToken);
+        var attachments = await _fileAssetRepository.ListByIdsAsync(attachmentIds, context.TenantId, cancellationToken);
+        if (attachments.Count != attachmentIds.Count)
+        {
+            _logger.LogWarning(
+                "Only {LoadedAttachmentCount} of {RequestedAttachmentCount} attachments were found for tenant {TenantId}.",
+                attachments.Count,
+                attachmentIds.Count,
+                context.TenantId);
+        }
+
+        return attachments;
     }
 
     private async Task<IReadOnlyCollection<ConversationMessage>> AttachOperationToUserMessageAndLoadHistoryAsync(
@@ -428,6 +503,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             task.Title,
             task.TaskType,
             task.Status.ToString(),
+            task.InteractionMode.ToString(),
+            task.InstructionText,
             task.ProposedPayloadJson,
             task.FinalPayloadJson,
             task.Notes,

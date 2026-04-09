@@ -46,8 +46,8 @@ public sealed class LlmMessageIntentClassifier : IMessageIntentClassifier
 
         if (decision is null || string.IsNullOrWhiteSpace(decision.DecisionType))
         {
-            _logger.LogWarning("Routing classifier returned no valid decision. Falling back to deterministic rescue routing.");
-            return BuildFallbackDecision(message, operations, reviewTasks, availableAgents);
+            _logger.LogWarning("Routing classifier returned no valid decision. Returning an ambiguous routing result.");
+            return Ambiguous("Routing LLM returned no valid routing decision.");
         }
 
         return decision.ToRoutingDecision();
@@ -55,7 +55,7 @@ public sealed class LlmMessageIntentClassifier : IMessageIntentClassifier
 
     private static string BuildSystemPrompt() =>
         """
-        You classify user chat messages into a routing decision for a fund administration orchestration platform.
+        You classify user chat messages into a routing decision for an orchestration platform.
 
         Return JSON only. No markdown. No explanation outside JSON.
 
@@ -142,84 +142,6 @@ public sealed class LlmMessageIntentClassifier : IMessageIntentClassifier
 
     private static RoutingDecision Ambiguous(string explanation) =>
         new(RoutingDecisionType.AmbiguousNeedClarification, Explanation: explanation);
-
-    private static RoutingDecision BuildFallbackDecision(
-        string message,
-        IReadOnlyCollection<AgentOperation> operations,
-        IReadOnlyCollection<ReviewTask> reviewTasks,
-        IReadOnlyCollection<AgentDefinition> availableAgents)
-    {
-        var normalized = message.Trim().ToLowerInvariant();
-        var activeOperations = operations
-            .Where(operation => operation.Status is not AgentOperationStatus.Completed and not AgentOperationStatus.Failed and not AgentOperationStatus.Cancelled)
-            .ToArray();
-
-        if ((normalized.Contains("approve", StringComparison.Ordinal) || normalized.Contains("reject", StringComparison.Ordinal)) &&
-            reviewTasks.Count(task => task.Status == ReviewTaskStatus.Open) == 1)
-        {
-            var task = reviewTasks.First(task => task.Status == ReviewTaskStatus.Open);
-            return new RoutingDecision(
-                RoutingDecisionType.RespondToReviewTask,
-                OperationId: task.OperationId,
-                ReviewTaskId: task.Id,
-                Explanation: "Fallback routed an approval/rejection response to the single open review task.");
-        }
-
-        if ((normalized.Contains("status", StringComparison.Ordinal) || normalized.StartsWith("what's", StringComparison.Ordinal) || normalized.StartsWith("whats", StringComparison.Ordinal)) &&
-            activeOperations.Length <= 1)
-        {
-            return new RoutingDecision(
-                RoutingDecisionType.AskStatus,
-                OperationId: activeOperations.SingleOrDefault()?.Id,
-                Explanation: "Fallback classified the message as a status request.");
-        }
-
-        if (activeOperations.Length == 1 &&
-            activeOperations[0].Status == AgentOperationStatus.ClarificationRequired &&
-            !normalized.Contains("status", StringComparison.Ordinal))
-        {
-            return new RoutingDecision(
-                RoutingDecisionType.ContinueOperation,
-                OperationId: activeOperations[0].Id,
-                Explanation: "Fallback attached the message to the single operation waiting for clarification.");
-        }
-
-        var agentId = ResolveAgentId(normalized, availableAgents);
-        if (!string.IsNullOrWhiteSpace(agentId))
-        {
-            return new RoutingDecision(
-                RoutingDecisionType.StartNewOperation,
-                AgentId: agentId,
-                Explanation: "Fallback matched the message to an available agent capability.");
-        }
-
-        return Ambiguous("Routing LLM returned an invalid routing decision and fallback routing could not determine a safe target.");
-    }
-
-    private static string? ResolveAgentId(string normalizedMessage, IReadOnlyCollection<AgentDefinition> availableAgents)
-    {
-        if (normalizedMessage.Contains("capital call", StringComparison.Ordinal) || normalizedMessage.Contains("notice", StringComparison.Ordinal))
-        {
-            return availableAgents.FirstOrDefault(agent =>
-                agent.DisplayName.Contains("Notice", StringComparison.OrdinalIgnoreCase))?.Id;
-        }
-
-        if (normalizedMessage.Contains("onboarding", StringComparison.Ordinal) ||
-            normalizedMessage.Contains("agreement", StringComparison.Ordinal) ||
-            normalizedMessage.Contains("document", StringComparison.Ordinal))
-        {
-            return availableAgents.FirstOrDefault(agent =>
-                agent.DisplayName.Contains("Onboarding", StringComparison.OrdinalIgnoreCase))?.Id;
-        }
-
-        if (normalizedMessage.Contains("one-pager", StringComparison.Ordinal) || normalizedMessage.Contains("one pager", StringComparison.Ordinal))
-        {
-            return availableAgents.FirstOrDefault(agent =>
-                agent.DisplayName.Contains("One", StringComparison.OrdinalIgnoreCase))?.Id;
-        }
-
-        return null;
-    }
 
     private sealed class LlmRoutingDecision
     {

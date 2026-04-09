@@ -449,7 +449,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         if (result.PendingRequests.Count > 0)
         {
             var nextRequest = result.PendingRequests.Last();
-            if (string.Equals(nextRequest.PortId, CapitalCallNoticeWorkflowPorts.AllocationReview, StringComparison.Ordinal))
+            if (string.Equals(nextRequest.PortId, CapitalCallNoticeWorkflowPorts.ExtractionReview, StringComparison.Ordinal))
             {
                 var reviewTask = await EnsureReviewTaskAsync(nextRequest, cancellationToken);
                 _logger.LogInformation(
@@ -463,11 +463,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 operation.CurrentStep = reviewTask.TaskType;
                 operation.PendingClarification = null;
                 operation.ActiveReviewTaskId = reviewTask.Id;
-                operation.Summary = "Capital call allocations are ready for review before the Excel output is created.";
+                operation.Summary = "Extracted partner and feeder commitment data is ready for review. Download the workbook, edit the payload if needed, then submit it so the allocation engine can continue.";
                 await _operationRepository.UpsertAsync(operation, cancellationToken);
                 await AddConversationUpdateAsync(
                     operation,
-                    "Capital call allocations are ready for review. Approve them from the review queue to generate the Excel output.",
+                    "I extracted the partner, feeder, and commitment data for this capital call. Review it from the review queue, make any corrections you need, and submit it so I can calculate the final allocations.",
                     cancellationToken);
                 await _auditEventRepository.AddAsync(
                     BuildCapitalCallAuditEvent(operation, "CapitalCallReviewRequested", new
@@ -508,32 +508,58 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             return;
         }
 
-        var persistedOperation = await _operationRepository.GetAsync(operation.Id, context.TenantId, cancellationToken);
-        if (persistedOperation is not null && HasWorkflowManagedCapitalCallState(persistedOperation))
+        var completion = result.Outputs
+            .FirstOrDefault(output => string.Equals(output.OutputType, nameof(CapitalCallWorkflowCompleted), StringComparison.Ordinal));
+        if (completion is not null)
         {
-            CopyOperationState(persistedOperation, operation);
-        }
-        else
-        {
-            operation.Status = result.Instance.Status == WorkflowInstanceStatus.Completed
-                ? AgentOperationStatus.Completed
-                : AgentOperationStatus.Running;
-            operation.CurrentStep = result.Instance.CurrentStep;
-            operation.PendingClarification = null;
-            operation.Summary = string.IsNullOrWhiteSpace(operation.Summary)
-                ? result.Instance.Status == WorkflowInstanceStatus.Completed
-                    ? "The capital call workflow completed successfully."
-                    : "The capital call workflow is running."
-                : operation.Summary;
-            await _operationRepository.UpsertAsync(operation, cancellationToken);
-        }
+            var completedPayload = JsonContent.Deserialize<CapitalCallWorkflowCompleted>(completion.PayloadJson)
+                ?? throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
 
-        if (operation.Status == AgentOperationStatus.Completed)
-        {
+            operation.Status = AgentOperationStatus.Completed;
+            operation.CurrentStep = "ReviewedDataReady";
+            operation.PendingClarification = null;
+            operation.ActiveReviewTaskId = null;
+            operation.Summary = "Reviewed capital call allocations are approved and ready for a template output operation.";
+            operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
+            {
+                RequestStateJson = completedPayload.RequestStateJson,
+                ReviewedExtractionJson = completedPayload.ReviewedExtractionJson,
+                FundName = completedPayload.FundName,
+                CapitalCallAmount = completedPayload.RootCapitalCallAmount,
+                RootCurrency = completedPayload.RootCurrency,
+                NoticeDtoJson = completedPayload.NoticeDtoJson,
+                ReviewFileAssetId = completedPayload.ReviewFileAssetId,
+                ReviewDownloadRoute = completedPayload.ReviewDownloadRoute,
+                ReviewFileName = completedPayload.ReviewFileName
+            });
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
             await AddConversationUpdateAsync(
                 operation,
-                "Capital call review is complete and the Excel output is ready to download.",
+                "Capital call review is complete. The approved allocation data is now ready for a reusable template output operation.",
                 cancellationToken);
+        }
+
+        else
+        {
+            var persistedOperation = await _operationRepository.GetAsync(operation.Id, context.TenantId, cancellationToken);
+            if (persistedOperation is not null && HasWorkflowManagedCapitalCallState(persistedOperation))
+            {
+                CopyOperationState(persistedOperation, operation);
+            }
+            else
+            {
+                operation.Status = result.Instance.Status == WorkflowInstanceStatus.Completed
+                    ? AgentOperationStatus.Completed
+                    : AgentOperationStatus.Running;
+                operation.CurrentStep = result.Instance.CurrentStep;
+                operation.PendingClarification = null;
+                operation.Summary = string.IsNullOrWhiteSpace(operation.Summary)
+                    ? result.Instance.Status == WorkflowInstanceStatus.Completed
+                        ? "The capital call workflow completed successfully."
+                        : "The capital call workflow is running."
+                    : operation.Summary;
+                await _operationRepository.UpsertAsync(operation, cancellationToken);
+            }
         }
 
         await _auditEventRepository.AddAsync(
@@ -652,6 +678,10 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                     existingTask.Id,
                     pendingRequest.Id);
                 existingTask.ProposedPayloadJson = pendingRequest.RequestPayloadJson;
+                existingTask.Title = ResolveReviewTaskTitle(pendingRequest.PortId);
+                existingTask.TaskType = ResolveReviewTaskType(pendingRequest.PortId);
+                existingTask.InteractionMode = ResolveReviewTaskInteractionMode(pendingRequest.PortId);
+                existingTask.InstructionText = ResolveReviewTaskInstruction(pendingRequest.PortId);
                 existingTask.Status = ReviewTaskStatus.Open;
                 existingTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 await _reviewTaskRepository.UpsertAsync(existingTask, cancellationToken);
@@ -667,6 +697,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             WorkflowPendingRequestId = pendingRequest.Id,
             Title = ResolveReviewTaskTitle(pendingRequest.PortId),
             TaskType = ResolveReviewTaskType(pendingRequest.PortId),
+            InteractionMode = ResolveReviewTaskInteractionMode(pendingRequest.PortId),
+            InstructionText = ResolveReviewTaskInstruction(pendingRequest.PortId),
             ProposedPayloadJson = pendingRequest.RequestPayloadJson
         };
 
@@ -780,7 +812,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         {
             FundOnboardingWorkflowPorts.ClassificationReview => "Classification Review",
             FundOnboardingWorkflowPorts.ExtractionReview => "Extraction Review",
-            CapitalCallNoticeWorkflowPorts.AllocationReview => "Capital Call Allocation Review",
+            CapitalCallNoticeWorkflowPorts.ExtractionReview => "Capital Call Partner Data Review",
             _ => "Workflow Review"
         };
 
@@ -789,8 +821,24 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         {
             FundOnboardingWorkflowPorts.ClassificationReview => "ClassificationReview",
             FundOnboardingWorkflowPorts.ExtractionReview => "ExtractionReview",
-            CapitalCallNoticeWorkflowPorts.AllocationReview => "CapitalCallAllocationReview",
+            CapitalCallNoticeWorkflowPorts.ExtractionReview => "CapitalCallExtractionReview",
             _ => "WorkflowReview"
+        };
+
+    private static ReviewTaskInteractionMode ResolveReviewTaskInteractionMode(string portId) =>
+        portId switch
+        {
+            CapitalCallNoticeWorkflowPorts.ExtractionReview => ReviewTaskInteractionMode.EditAndSubmit,
+            _ => ReviewTaskInteractionMode.ApproveReject
+        };
+
+    private static string? ResolveReviewTaskInstruction(string portId) =>
+        portId switch
+        {
+            CapitalCallNoticeWorkflowPorts.ExtractionReview => "Review the extracted partners, feeder structure, currencies, and commitment percentages. Edit the payload if anything is wrong, then submit it so the allocation engine uses your reviewed data.",
+            FundOnboardingWorkflowPorts.ClassificationReview => "Approve the document classification when the extracted categories look correct.",
+            FundOnboardingWorkflowPorts.ExtractionReview => "Approve the extracted fund fields when the values look correct.",
+            _ => null
         };
 
     private static string ExtractCapitalCallRequestStateJson(AgentOperation operation)

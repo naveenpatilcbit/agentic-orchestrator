@@ -5,6 +5,7 @@ using ConversationalOrchestration.Domain.Auditing;
 using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using System.Text.Json;
 
 namespace ConversationalOrchestration.Application.Reviews;
 
@@ -55,18 +56,26 @@ public sealed class ReviewTaskService : IReviewTaskService
             return new ChatInteractionResult("I couldn't find that review task anymore.", string.Empty);
         }
 
-        var decision = message.ToLowerInvariant().Contains("reject", StringComparison.Ordinal)
+        if (reviewTask.InteractionMode == ReviewTaskInteractionMode.EditAndSubmit)
+        {
+            return new ChatInteractionResult(
+                $"{reviewTask.Title} needs a reviewed payload, so please open it from the review queue and submit your edits there.",
+                reviewTask.ConversationId,
+                reviewTask.OperationId);
+        }
+
+        var action = message.ToLowerInvariant().Contains("reject", StringComparison.Ordinal)
             ? "Rejected"
             : "Approved";
 
         var result = await ApplyDecisionAsync(
             reviewTask.Id,
-            new ReviewDecisionRequest(decision, reviewTask.ProposedPayloadJson, $"Submitted from chat: {message}"),
+            new ReviewDecisionRequest(action, reviewTask.ProposedPayloadJson, $"Submitted from chat: {message}"),
             context,
             cancellationToken);
 
         return new ChatInteractionResult(
-            decision == "Approved"
+            action == "Approved"
                 ? $"{reviewTask.Title} is approved. I resumed the workflow from the same conversation thread."
                 : $"{reviewTask.Title} was rejected. The workflow is paused until the data is corrected.",
             result.ConversationId,
@@ -85,26 +94,40 @@ public sealed class ReviewTaskService : IReviewTaskService
             ?? throw new InvalidOperationException("Operation not found.");
         var conversation = await _conversationRepository.GetAsync(reviewTask.ConversationId, context.TenantId, cancellationToken)
             ?? throw new InvalidOperationException("Conversation not found.");
+        var outcome = ResolveOutcome(reviewTask, request.Action);
+        var finalPayloadJson = request.FinalPayloadJson ?? reviewTask.ProposedPayloadJson;
 
-        reviewTask.Status = request.Decision.Equals("Approved", StringComparison.OrdinalIgnoreCase)
-            ? ReviewTaskStatus.Approved
-            : ReviewTaskStatus.Rejected;
-        reviewTask.FinalPayloadJson = request.FinalPayloadJson ?? reviewTask.ProposedPayloadJson;
+        if (outcome.ContinuesWorkflow && reviewTask.InteractionMode == ReviewTaskInteractionMode.EditAndSubmit)
+        {
+            try
+            {
+                using var _ = JsonDocument.Parse(finalPayloadJson);
+            }
+            catch (JsonException exception)
+            {
+                throw new InvalidOperationException("The reviewed payload must be valid JSON before the workflow can continue.", exception);
+            }
+        }
+
+        reviewTask.Status = outcome.Status;
+        reviewTask.FinalPayloadJson = finalPayloadJson;
         reviewTask.Notes = request.Notes;
         reviewTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
 
         operation.ActiveReviewTaskId = null;
         operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        operation.Status = reviewTask.Status == ReviewTaskStatus.Approved
+        operation.Status = outcome.ContinuesWorkflow
             ? AgentOperationStatus.Running
             : AgentOperationStatus.ClarificationRequired;
-        operation.CurrentStep = reviewTask.Status == ReviewTaskStatus.Approved
+        operation.CurrentStep = outcome.ContinuesWorkflow
             ? "ResumeRequested"
-            : "ReviewRejected";
-        operation.PendingClarification = reviewTask.Status == ReviewTaskStatus.Approved
+            : reviewTask.Status == ReviewTaskStatus.NeedsChanges
+                ? "ReviewNeedsChanges"
+                : "ReviewRejected";
+        operation.PendingClarification = outcome.ContinuesWorkflow
             ? null
-            : "Review was rejected. Update the payload and resubmit the workflow.";
+            : outcome.PendingClarification;
         await _operationRepository.UpsertAsync(operation, cancellationToken);
 
         await _conversationMessageRepository.AddAsync(
@@ -115,9 +138,9 @@ public sealed class ReviewTaskService : IReviewTaskService
                 OperationId = operation.Id,
                 AuthorId = "system",
                 Role = ConversationMessageRole.System,
-                Content = reviewTask.Status == ReviewTaskStatus.Approved
-                    ? $"{reviewTask.Title} approved. Resuming {operation.Title}."
-                    : $"{reviewTask.Title} rejected. {operation.Title} is paused until the data is corrected.",
+                Content = outcome.ContinuesWorkflow
+                    ? $"{reviewTask.Title} {outcome.ActionLabel}. Resuming {operation.Title}."
+                    : $"{reviewTask.Title} {outcome.ActionLabel}. {operation.Title} is paused until the data is corrected.",
                 MessageKind = "review"
             },
             cancellationToken);
@@ -134,13 +157,14 @@ public sealed class ReviewTaskService : IReviewTaskService
                 DataJson = JsonContent.Serialize(new
                 {
                     reviewTaskId = reviewTask.Id,
+                    action = request.Action,
                     decision = reviewTask.Status.ToString(),
                     payload = reviewTask.FinalPayloadJson
                 })
             },
             cancellationToken);
 
-        if (reviewTask.Status == ReviewTaskStatus.Approved)
+        if (outcome.ContinuesWorkflow)
         {
             var handler = _reviewContinuationHandlers.FirstOrDefault(candidate => candidate.CanHandle(operation, reviewTask));
             if (handler is not null)
@@ -152,10 +176,43 @@ public sealed class ReviewTaskService : IReviewTaskService
         }
 
         return new ChatInteractionResult(
-            reviewTask.Status == ReviewTaskStatus.Approved
-                ? $"{reviewTask.Title} approved. The workflow is continuing from the saved checkpoint."
-                : $"{reviewTask.Title} rejected. The workflow is paused for correction.",
+            outcome.ContinuesWorkflow
+                ? $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is continuing from the saved checkpoint."
+                : $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is paused for correction.",
             conversation.Id,
             operation.Id);
     }
+
+    private static ReviewOutcome ResolveOutcome(ReviewTask reviewTask, string? action)
+    {
+        var normalizedAction = action?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAction))
+        {
+            normalizedAction = reviewTask.InteractionMode == ReviewTaskInteractionMode.EditAndSubmit
+                ? "Submitted"
+                : "Approved";
+        }
+
+        if (normalizedAction.Equals("Rejected", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ReviewOutcome(false, ReviewTaskStatus.Rejected, "rejected", "Review was rejected. Update the payload and resubmit the workflow.");
+        }
+
+        if (normalizedAction.Equals("NeedsChanges", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ReviewOutcome(false, ReviewTaskStatus.NeedsChanges, "sent back with changes", "Review needs changes. Update the payload and submit the workflow again.");
+        }
+
+        return new ReviewOutcome(
+            true,
+            ReviewTaskStatus.Approved,
+            reviewTask.InteractionMode == ReviewTaskInteractionMode.EditAndSubmit ? "submitted" : "approved",
+            null);
+    }
+
+    private sealed record ReviewOutcome(
+        bool ContinuesWorkflow,
+        ReviewTaskStatus Status,
+        string ActionLabel,
+        string? PendingClarification);
 }
