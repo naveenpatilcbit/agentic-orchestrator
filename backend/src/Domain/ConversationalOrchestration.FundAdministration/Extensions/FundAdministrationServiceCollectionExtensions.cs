@@ -1,6 +1,7 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.FundAdministration.Agents;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
+using ConversationalOrchestration.FundAdministration.CapitalCalls.Demo;
 using ConversationalOrchestration.FundAdministration.Workflows;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -17,14 +18,14 @@ public static class FundAdministrationServiceCollectionExtensions
         services.AddScoped<ICapitalCallRequestPreparationService, CapitalCallRequestPreparationService>();
         services.AddScoped<ICapitalCallAllocationEngine, CapitalCallAllocationEngine>();
         services.AddScoped<ICapitalCallResultMaterializer, CapitalCallResultMaterializer>();
+        services.AddSingleton<ICapitalCallProviderConfigurationService, InMemoryCapitalCallProviderConfigurationService>();
         services.AddScoped<ICapitalCallDataProvider, CsvAttachmentCapitalCallDataProvider>();
         services.AddSingleton<ICapitalCallDataProvider, InMemorySaaSCapitalCallDataProvider>();
         services.AddSingleton<IFxRateProvider, SampleFxRateProvider>();
-        services.AddSingleton<CapitalCallWorkflowTools>();
-        services.AddSingleton<CapitalCallWorkflowResponseAgentProvider>();
         services.AddSingleton<IWorkflowDefinition, CapitalCallNoticeWorkflowDefinition>();
         services.AddSingleton<IWorkflowDefinition, FundOnboardingWorkflowDefinition>();
         services.AddScoped<IFundAdministrationWorkflowDispatcher, FundAdministrationWorkflowDispatcher>();
+        services.AddScoped<IReviewContinuationHandler, CapitalCallReviewContinuationHandler>();
         services.AddScoped<IReviewContinuationHandler, FundOnboardingReviewContinuationHandler>();
         return services;
     }

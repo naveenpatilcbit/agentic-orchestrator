@@ -7,6 +7,7 @@ using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
+using Microsoft.Extensions.Logging;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
 
@@ -23,6 +24,14 @@ public interface IFundAdministrationWorkflowDispatcher
         AgentOperation operation,
         ConversationThread conversation,
         string clarificationMessage,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken);
+
+    Task ContinueCapitalCallReviewAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string reviewTaskId,
+        string finalPayloadJson,
         TenantExecutionContext context,
         CancellationToken cancellationToken);
 
@@ -54,6 +63,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
     private readonly IConversationMessageRepository _conversationMessageRepository;
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
+    private readonly ILogger<FundAdministrationWorkflowDispatcher> _logger;
 
     public FundAdministrationWorkflowDispatcher(
         ICapitalCallConversationIntelligence capitalCallConversationIntelligence,
@@ -64,7 +74,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         IAgentOperationRepository operationRepository,
         IConversationMessageRepository conversationMessageRepository,
         IAuditEventRepository auditEventRepository,
-        IConversationHistoryCompactionService conversationHistoryCompactionService)
+        IConversationHistoryCompactionService conversationHistoryCompactionService,
+        ILogger<FundAdministrationWorkflowDispatcher> logger)
     {
         _capitalCallConversationIntelligence = capitalCallConversationIntelligence;
         _capitalCallRequestPreparationService = capitalCallRequestPreparationService;
@@ -75,6 +86,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         _conversationMessageRepository = conversationMessageRepository;
         _auditEventRepository = auditEventRepository;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
+        _logger = logger;
     }
 
     public async Task StartCapitalCallNoticeAsync(
@@ -84,6 +96,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Starting capital call notice intake for tenant {TenantId} conversation {ConversationId} operation {OperationId}.",
+            context.TenantId,
+            conversation.Id,
+            operation.Id);
         var patch = await _capitalCallConversationIntelligence.CaptureIntentAsync(
             context.TenantId,
             conversation.Id,
@@ -100,6 +117,10 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
 
         if (!preparation.IsReady)
         {
+            _logger.LogInformation(
+                "Capital call operation {OperationId} requires clarification before workflow start. Prompt={Prompt}",
+                operation.Id,
+                preparation.ClarificationPrompt);
             await ApplyCapitalCallClarificationStateAsync(operation, preparation, cancellationToken);
             return;
         }
@@ -114,6 +135,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Continuing capital call notice intake for tenant {TenantId} conversation {ConversationId} operation {OperationId}.",
+            context.TenantId,
+            conversation.Id,
+            operation.Id);
         var patch = await _capitalCallConversationIntelligence.InterpretClarificationAsync(
             context.TenantId,
             conversation.Id,
@@ -130,11 +156,53 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
 
         if (!preparation.IsReady)
         {
+            _logger.LogInformation(
+                "Capital call operation {OperationId} still requires clarification. Prompt={Prompt}",
+                operation.Id,
+                preparation.ClarificationPrompt);
             await ApplyCapitalCallClarificationStateAsync(operation, preparation, cancellationToken);
             return;
         }
 
         await StartCapitalCallExecutionWorkflowAsync(operation, conversation, preparation, context, cancellationToken);
+    }
+
+    public async Task ContinueCapitalCallReviewAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string reviewTaskId,
+        string finalPayloadJson,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Continuing capital call review for tenant {TenantId} conversation {ConversationId} operation {OperationId}. ReviewTaskId={ReviewTaskId}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            reviewTaskId);
+
+        var pendingRequest = await ResolvePendingRequestAsync(reviewTaskId, operation, context.TenantId, cancellationToken);
+        if (pendingRequest is null)
+        {
+            _logger.LogError(
+                "Capital call review could not resolve pending workflow request for tenant {TenantId} operation {OperationId} reviewTask {ReviewTaskId}.",
+                context.TenantId,
+                operation.Id,
+                reviewTaskId);
+            throw new InvalidOperationException($"No pending workflow request was found for review task '{reviewTaskId}'.");
+        }
+
+        var result = await _workflowRuntimeService.ResumeAsync(
+            new WorkflowResumeRequest(
+                context.TenantId,
+                operation.WorkflowInstanceId ?? throw new InvalidOperationException("Workflow instance id is missing on the operation."),
+                pendingRequest.Id,
+                finalPayloadJson,
+                operation.LatestCheckpointId),
+            cancellationToken);
+
+        await ApplyCapitalCallWorkflowResultAsync(operation, result, context, cancellationToken);
     }
 
     public async Task StartOnboardingAsync(
@@ -144,6 +212,12 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Starting onboarding workflow for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Attachments={AttachmentCount}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            attachments.Count);
         var result = await _workflowRuntimeService.StartAsync(
             new WorkflowStartRequest(
                 context.TenantId,
@@ -170,9 +244,21 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Continuing onboarding review for tenant {TenantId} conversation {ConversationId} operation {OperationId}. ReviewTaskId={ReviewTaskId} ReviewType={ReviewType}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            reviewTaskId,
+            reviewType);
         var pendingRequest = await ResolvePendingRequestAsync(reviewTaskId, operation, context.TenantId, cancellationToken);
         if (pendingRequest is null)
         {
+            _logger.LogError(
+                "Pending workflow request could not be resolved for tenant {TenantId} operation {OperationId} reviewTask {ReviewTaskId}.",
+                context.TenantId,
+                operation.Id,
+                reviewTaskId);
             throw new InvalidOperationException($"No pending workflow request was found for review task '{reviewTaskId}'.");
         }
 
@@ -216,6 +302,13 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
 
         if (!string.IsNullOrWhiteSpace(result.ErrorMessage) || result.Instance.Status == WorkflowInstanceStatus.Failed)
         {
+            _logger.LogError(
+                "Onboarding workflow failed for tenant {TenantId} conversation {ConversationId} operation {OperationId} workflowInstance {WorkflowInstanceId}. Error={Error}",
+                context.TenantId,
+                conversation.Id,
+                operation.Id,
+                result.Instance.Id,
+                result.ErrorMessage);
             operation.Status = AgentOperationStatus.Failed;
             operation.CurrentStep = result.Instance.CurrentStep;
             operation.Summary = result.ErrorMessage ?? "The workflow failed before the next review checkpoint.";
@@ -232,6 +325,14 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         {
             var nextRequest = result.PendingRequests.Last();
             var reviewTask = await EnsureReviewTaskAsync(nextRequest, cancellationToken);
+            _logger.LogInformation(
+                "Onboarding workflow waiting for review for tenant {TenantId} conversation {ConversationId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} ReviewTaskId={ReviewTaskId} PortId={PortId}",
+                context.TenantId,
+                conversation.Id,
+                operation.Id,
+                result.Instance.Id,
+                reviewTask.Id,
+                nextRequest.PortId);
 
             operation.Status = AgentOperationStatus.WaitingForHumanReview;
             operation.CurrentStep = reviewTask.TaskType;
@@ -265,6 +366,13 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         {
             var completedPayload = JsonContent.Deserialize<FundOnboardingWorkflowCompleted>(completion.PayloadJson)
                 ?? throw new InvalidOperationException("Workflow completion payload could not be parsed.");
+            _logger.LogInformation(
+                "Onboarding workflow completed for tenant {TenantId} conversation {ConversationId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} FundName={FundName}",
+                context.TenantId,
+                conversation.Id,
+                operation.Id,
+                result.Instance.Id,
+                completedPayload.FundName);
 
             operation.Status = AgentOperationStatus.Completed;
             operation.CurrentStep = "DraftCreated";
@@ -296,6 +404,13 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         operation.CurrentStep = result.Instance.CurrentStep;
         operation.Summary = "The onboarding workflow resumed successfully and is waiting for the next transition.";
         await _operationRepository.UpsertAsync(operation, cancellationToken);
+        _logger.LogInformation(
+            "Onboarding workflow resumed for tenant {TenantId} conversation {ConversationId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} CurrentStep={CurrentStep}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            result.Instance.Id,
+            result.Instance.CurrentStep);
     }
 
     private async Task ApplyCapitalCallWorkflowResultAsync(
@@ -310,6 +425,12 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
 
         if (!string.IsNullOrWhiteSpace(result.ErrorMessage) || result.Instance.Status == WorkflowInstanceStatus.Failed)
         {
+            _logger.LogError(
+                "Capital call workflow failed for tenant {TenantId} operation {OperationId} workflowInstance {WorkflowInstanceId}. Error={Error}",
+                context.TenantId,
+                operation.Id,
+                result.Instance.Id,
+                result.ErrorMessage);
             operation.Status = AgentOperationStatus.Failed;
             operation.CurrentStep = result.Instance.CurrentStep;
             operation.PendingClarification = null;
@@ -328,21 +449,62 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         if (result.PendingRequests.Count > 0)
         {
             var nextRequest = result.PendingRequests.Last();
-            var clarificationPrompt = ResolveCapitalCallClarificationPrompt(result, nextRequest);
-            operation.Status = AgentOperationStatus.ClarificationRequired;
-            operation.CurrentStep = nextRequest.PortId;
-            operation.PendingClarification = clarificationPrompt;
-            operation.ActiveReviewTaskId = null;
-            operation.Summary = "Waiting for additional capital call details in the same chat thread.";
-            await _operationRepository.UpsertAsync(operation, cancellationToken);
-            await _auditEventRepository.AddAsync(
-                BuildCapitalCallAuditEvent(operation, "CapitalCallClarificationRequested", new
-                {
-                    workflowInstanceId = result.Instance.Id,
-                    pendingRequestId = nextRequest.Id,
-                    portId = nextRequest.PortId
-                }),
-                cancellationToken);
+            if (string.Equals(nextRequest.PortId, CapitalCallNoticeWorkflowPorts.AllocationReview, StringComparison.Ordinal))
+            {
+                var reviewTask = await EnsureReviewTaskAsync(nextRequest, cancellationToken);
+                _logger.LogInformation(
+                    "Capital call workflow waiting for human review for tenant {TenantId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} ReviewTaskId={ReviewTaskId}",
+                    context.TenantId,
+                    operation.Id,
+                    result.Instance.Id,
+                    reviewTask.Id);
+
+                operation.Status = AgentOperationStatus.WaitingForHumanReview;
+                operation.CurrentStep = reviewTask.TaskType;
+                operation.PendingClarification = null;
+                operation.ActiveReviewTaskId = reviewTask.Id;
+                operation.Summary = "Capital call allocations are ready for review before the Excel output is created.";
+                await _operationRepository.UpsertAsync(operation, cancellationToken);
+                await AddConversationUpdateAsync(
+                    operation,
+                    "Capital call allocations are ready for review. Approve them from the review queue to generate the Excel output.",
+                    cancellationToken);
+                await _auditEventRepository.AddAsync(
+                    BuildCapitalCallAuditEvent(operation, "CapitalCallReviewRequested", new
+                    {
+                        workflowInstanceId = result.Instance.Id,
+                        reviewTaskId = reviewTask.Id,
+                        pendingRequestId = nextRequest.Id,
+                        portId = nextRequest.PortId
+                    }),
+                    cancellationToken);
+            }
+            else
+            {
+                var clarificationPrompt = ResolveCapitalCallClarificationPrompt(result, nextRequest);
+                _logger.LogInformation(
+                    "Capital call workflow waiting for clarification for tenant {TenantId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} PendingRequestId={PendingRequestId} PortId={PortId}",
+                    context.TenantId,
+                    operation.Id,
+                    result.Instance.Id,
+                    nextRequest.Id,
+                    nextRequest.PortId);
+                operation.Status = AgentOperationStatus.ClarificationRequired;
+                operation.CurrentStep = nextRequest.PortId;
+                operation.PendingClarification = clarificationPrompt;
+                operation.ActiveReviewTaskId = null;
+                operation.Summary = "Waiting for additional capital call details in the same chat thread.";
+                await _operationRepository.UpsertAsync(operation, cancellationToken);
+                await _auditEventRepository.AddAsync(
+                    BuildCapitalCallAuditEvent(operation, "CapitalCallClarificationRequested", new
+                    {
+                        workflowInstanceId = result.Instance.Id,
+                        pendingRequestId = nextRequest.Id,
+                        portId = nextRequest.PortId
+                    }),
+                    cancellationToken);
+            }
+
             return;
         }
 
@@ -366,6 +528,14 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             await _operationRepository.UpsertAsync(operation, cancellationToken);
         }
 
+        if (operation.Status == AgentOperationStatus.Completed)
+        {
+            await AddConversationUpdateAsync(
+                operation,
+                "Capital call review is complete and the Excel output is ready to download.",
+                cancellationToken);
+        }
+
         await _auditEventRepository.AddAsync(
             BuildCapitalCallAuditEvent(operation, "CapitalCallWorkflowCompleted", new
             {
@@ -373,6 +543,13 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 checkpointId = result.Instance.LatestCheckpointId
             }),
             cancellationToken);
+        _logger.LogInformation(
+            "Capital call workflow completed or advanced for tenant {TenantId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} Status={Status} CurrentStep={CurrentStep}",
+            context.TenantId,
+            operation.Id,
+            result.Instance.Id,
+            operation.Status,
+            operation.CurrentStep);
     }
 
     private async Task ApplyCapitalCallClarificationStateAsync(
@@ -380,6 +557,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         CapitalCallPreparationResult preparation,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Applying capital call clarification state for tenant {TenantId} operation {OperationId}. Prompt={Prompt}",
+            operation.TenantId,
+            operation.Id,
+            preparation.ClarificationPrompt);
         operation.Status = AgentOperationStatus.ClarificationRequired;
         operation.CurrentStep = "CaptureInputs";
         operation.WorkflowInstanceId = null;
@@ -414,6 +596,14 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "Starting capital call workflow for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Profile={Profile} FundName={FundName} Amount={Amount}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            preparation.RequestState.Profile,
+            preparation.RequestState.FundName,
+            preparation.RequestState.CapitalCallAmount);
         operation.Status = AgentOperationStatus.Running;
         operation.CurrentStep = "CapitalCallWorkflow";
         operation.PendingClarification = null;
@@ -428,7 +618,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             RequestStateJson = preparation.RequestStateJson
         });
 
-        var result = await _workflowRuntimeService.StartAsync(
+         var result = await _workflowRuntimeService.StartAsync(
             new WorkflowStartRequest(
                 context.TenantId,
                 conversation.Id,
@@ -457,6 +647,10 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             var existingTask = await _reviewTaskRepository.GetAsync(pendingRequest.ReviewTaskId, pendingRequest.TenantId, cancellationToken);
             if (existingTask is not null)
             {
+                _logger.LogDebug(
+                    "Reusing existing review task {ReviewTaskId} for workflow pending request {PendingRequestId}.",
+                    existingTask.Id,
+                    pendingRequest.Id);
                 existingTask.ProposedPayloadJson = pendingRequest.RequestPayloadJson;
                 existingTask.Status = ReviewTaskStatus.Open;
                 existingTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -471,12 +665,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             ConversationId = pendingRequest.ConversationId,
             OperationId = pendingRequest.OperationId,
             WorkflowPendingRequestId = pendingRequest.Id,
-            Title = pendingRequest.PortId == FundOnboardingWorkflowPorts.ClassificationReview
-                ? "Classification Review"
-                : "Extraction Review",
-            TaskType = pendingRequest.PortId == FundOnboardingWorkflowPorts.ClassificationReview
-                ? "ClassificationReview"
-                : "ExtractionReview",
+            Title = ResolveReviewTaskTitle(pendingRequest.PortId),
+            TaskType = ResolveReviewTaskType(pendingRequest.PortId),
             ProposedPayloadJson = pendingRequest.RequestPayloadJson
         };
 
@@ -484,6 +674,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         pendingRequest.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
         await _workflowPendingRequestRepository.UpsertAsync(pendingRequest, cancellationToken);
+        _logger.LogInformation(
+            "Created review task {ReviewTaskId} for workflow pending request {PendingRequestId} on operation {OperationId}.",
+            reviewTask.Id,
+            pendingRequest.Id,
+            pendingRequest.OperationId);
 
         return reviewTask;
     }
@@ -579,6 +774,24 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             ? pendingRequest.PromptText
             : "I still need the missing capital call details before I can calculate the capital call allocations.";
     }
+
+    private static string ResolveReviewTaskTitle(string portId) =>
+        portId switch
+        {
+            FundOnboardingWorkflowPorts.ClassificationReview => "Classification Review",
+            FundOnboardingWorkflowPorts.ExtractionReview => "Extraction Review",
+            CapitalCallNoticeWorkflowPorts.AllocationReview => "Capital Call Allocation Review",
+            _ => "Workflow Review"
+        };
+
+    private static string ResolveReviewTaskType(string portId) =>
+        portId switch
+        {
+            FundOnboardingWorkflowPorts.ClassificationReview => "ClassificationReview",
+            FundOnboardingWorkflowPorts.ExtractionReview => "ExtractionReview",
+            CapitalCallNoticeWorkflowPorts.AllocationReview => "CapitalCallAllocationReview",
+            _ => "WorkflowReview"
+        };
 
     private static string ExtractCapitalCallRequestStateJson(AgentOperation operation)
     {

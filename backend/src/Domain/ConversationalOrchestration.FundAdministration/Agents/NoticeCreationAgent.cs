@@ -23,7 +23,7 @@ public sealed class NoticeCreationAgent : IAgent
     public AgentDefinition Definition { get; } = new(
         FundAdministrationAgentIds.NoticeCreation,
         "Notice Creation Helper",
-        "Calculates partner and feeder allocations for a capital call notice, then materializes a draft or downloadable output.",
+        "Calculates partner and feeder allocations for a capital call notice, routes them through human review, then generates a downloadable Excel output.",
         AgentExecutionMode.Workflow);
 
     public async Task<AgentExecutionResult> StartAsync(
@@ -94,6 +94,13 @@ public sealed class NoticeCreationAgent : IAgent
             return Task.FromResult(operation.PendingClarification ?? "Waiting for additional capital call details.");
         }
 
+        if (operation.Status == AgentOperationStatus.WaitingForHumanReview)
+        {
+            return Task.FromResult(string.IsNullOrWhiteSpace(operation.Summary)
+                ? "Capital call allocations are waiting for review approval."
+                : operation.Summary);
+        }
+
         return Task.FromResult(string.IsNullOrWhiteSpace(operation.Summary)
             ? "The capital call workflow is active."
             : operation.Summary);
@@ -116,29 +123,30 @@ public sealed class NoticeCreationAgent : IAgent
                 }],
                 BuildAudit(operation, "CapitalCallClarificationRequested", new { operation.PendingClarification })),
 
-            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.DraftRoute) => new AgentExecutionResult(
-                $"I calculated the partner allocations for {data.FundName} and created a draft capital call notice in {data.RootCurrency}.",
-                operation,
-                [new AgentAction
-                {
-                    Type = AgentActionType.OpenPageWithPrefill,
-                    Label = "Open draft notice",
-                    Route = data.DraftRoute,
-                    PayloadJson = JsonContent.Serialize(data)
-                }],
-                BuildAudit(operation, "CapitalCallDraftMaterialized", data)),
-
             AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.DownloadRoute) => new AgentExecutionResult(
-                $"I calculated the partner allocations for {data.FundName} and generated a downloadable output file.",
+                $"I calculated the partner allocations for {data.FundName} and generated a downloadable Excel file.",
                 operation,
                 [new AgentAction
                 {
                     Type = AgentActionType.DownloadArtifact,
-                    Label = "Download allocation output",
+                    Label = "Download Excel output",
                     Route = data.DownloadRoute,
                     PayloadJson = JsonContent.Serialize(data)
                 }],
                 BuildAudit(operation, "CapitalCallArtifactMaterialized", data)),
+
+            AgentOperationStatus.WaitingForHumanReview => new AgentExecutionResult(
+                string.IsNullOrWhiteSpace(operation.Summary)
+                    ? "Capital call allocations are ready for review before the Excel output is generated."
+                    : operation.Summary,
+                operation,
+                [new AgentAction
+                {
+                    Type = AgentActionType.ShowStatus,
+                    Label = "Open review queue",
+                    PayloadJson = JsonContent.Serialize(new { operationId = operation.Id, status = operation.Status.ToString() })
+                }],
+                BuildAudit(operation, "CapitalCallReviewRequested", new { operation.Status, operation.CurrentStep })),
 
             AgentOperationStatus.Failed => new AgentExecutionResult(
                 $"The capital call workflow hit an error: {operation.Summary}",

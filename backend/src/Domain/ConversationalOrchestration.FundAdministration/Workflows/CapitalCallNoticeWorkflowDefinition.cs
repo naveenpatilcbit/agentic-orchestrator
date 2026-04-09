@@ -1,11 +1,9 @@
-using System.IO;
 using ConversationalOrchestration.Application.Abstractions;
+using ConversationalOrchestration.Application.Support;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
 using Microsoft.Agents.AI.Workflows;
-using Microsoft.Agents.AI.Workflows.Declarative;
 using Microsoft.Agents.AI.Workflows.Declarative.Events;
-using Microsoft.Extensions.AI;
-using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
 
@@ -14,52 +12,28 @@ public static partial class FundAdministrationWorkflowNames
     public const string CapitalCallNotice = "capital-call-notice";
 }
 
-public static class CapitalCallWorkflowPorts
+public static class CapitalCallNoticeWorkflowPorts
 {
-    public const string ClarificationInput = "request_capital_call_clarification_Input";
+    public const string AllocationReview = "capital-call-allocation-review";
 }
+
+public sealed record CapitalCallAllocationReviewPayload(
+    string TenantId,
+    string ConversationId,
+    string OperationId,
+    string RequestStateJson,
+    CapitalCallNoticeDto Notice);
 
 public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 {
-    private const string WorkflowYaml =
-        """
-        kind: Workflow
-        trigger:
-          kind: OnConversationStart
-          id: capital_call_notice_flow
-          actions:
-            - kind: SetVariable
-              id: load_request_state
-              variable: Local.CurrentStateJson
-              value: =System.LastMessage.Text
+    private static readonly RequestPort<CapitalCallAllocationReviewPayload, CapitalCallAllocationReviewPayload> AllocationReviewPort =
+        RequestPort.Create<CapitalCallAllocationReviewPayload, CapitalCallAllocationReviewPayload>(CapitalCallNoticeWorkflowPorts.AllocationReview);
 
-            - kind: InvokeFunctionTool
-              id: compute_allocations
-              functionName: computeCapitalCallAllocations
-              arguments:
-                tenantId: tenant-demo
-                conversationId: =System.ConversationId
-                requestStateJson: =Local.CurrentStateJson
-              output:
-                result: Local.ComputationResult
+    private readonly IServiceScopeFactory _serviceScopeFactory;
 
-            - kind: InvokeFunctionTool
-              id: materialize_result
-              functionName: materializeCapitalCallResult
-              arguments:
-                tenantId: tenant-demo
-                conversationId: =System.ConversationId
-                requestStateJson: =Local.CurrentStateJson
-                noticeDtoJson: =Local.ComputationResult.noticeDtoJson
-              output:
-                result: Local.MaterializedResult
-        """;
-
-    private readonly CapitalCallWorkflowResponseAgentProvider _agentProvider;
-
-    public CapitalCallNoticeWorkflowDefinition(CapitalCallWorkflowResponseAgentProvider agentProvider)
+    public CapitalCallNoticeWorkflowDefinition(IServiceScopeFactory serviceScopeFactory)
     {
-        _agentProvider = agentProvider;
+        _serviceScopeFactory = serviceScopeFactory;
     }
 
     public string Name => FundAdministrationWorkflowNames.CapitalCallNotice;
@@ -68,96 +42,137 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 
     public Workflow Build(WorkflowBuildContext buildContext)
     {
-        var options = new DeclarativeWorkflowOptions(_agentProvider)
+        // This workflow covers the deterministic execution phase after chat intake has already
+        // collected the required request inputs.
+        // User clarification happens before the workflow starts.
+        var loadRequestState = new LoadRequestStateExecutor().BindExecutor();
+        var computeAllocations = new ComputeCapitalCallAllocationsExecutor(_serviceScopeFactory).BindExecutor();
+        var allocationReview = AllocationReviewPort.BindAsExecutor();
+        var materializeResult = new MaterializeCapitalCallResultExecutor(_serviceScopeFactory).BindExecutor();
+
+        // Graph shape:
+        // start -> load request state -> compute allocations -> human review -> materialize result -> output
+        return new WorkflowBuilder(loadRequestState)
+            .WithName("Capital Call Notice")
+            .WithDescription("Loads request state, computes capital call allocations, pauses for human review, and materializes the final Excel output.")
+            .AddEdge(loadRequestState, computeAllocations, "load -> compute", idempotent: true)
+            .AddEdge(computeAllocations, allocationReview, "compute -> review", idempotent: true)
+            .AddEdge(allocationReview, materializeResult, "review -> materialize", idempotent: true)
+            .WithOutputFrom(materializeResult)
+            .Build(validateOrphans: true);
+    }
+
+    public RequestPortDescriptor ResolveRequestPort(string portId) =>
+        portId switch
         {
-            ConversationId = buildContext.ConversationId
+            CapitalCallNoticeWorkflowPorts.AllocationReview => new RequestPortDescriptor(
+                CapitalCallNoticeWorkflowPorts.AllocationReview,
+                typeof(CapitalCallAllocationReviewPayload),
+                typeof(CapitalCallAllocationReviewPayload),
+                AllocationReviewPort),
+            _ => throw new InvalidOperationException(
+                $"Workflow '{Name}' does not define request port '{portId}'. Capital call clarification currently happens before the workflow starts.")
         };
 
-        using var reader = new StringReader(WorkflowYaml);
-        return DeclarativeWorkflowBuilder.Build<CapitalCallWorkflowStart>(
-            reader,
-            options,
-            input => new ChatMessage(
-                ChatRole.User,
-                string.IsNullOrWhiteSpace(input.RequestStateJson)
-                    ? input.InitialUserMessage
-                    : input.RequestStateJson));
-    }
-
-    public RequestPortDescriptor ResolveRequestPort(string portId)
-    {
-        if (!string.Equals(portId, CapitalCallWorkflowPorts.ClarificationInput, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"Request port '{portId}' is not defined for workflow '{Name}'.");
-        }
-
-        var port = RequestPort.Create<ExternalInputRequest, ExternalInputResponse>(CapitalCallWorkflowPorts.ClarificationInput);
-        return new RequestPortDescriptor(
-            CapitalCallWorkflowPorts.ClarificationInput,
-            typeof(ExternalInputRequest),
-            typeof(ExternalInputResponse),
-            port);
-    }
-
-    public async Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
+    public Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
         RequestInfoEvent requestInfoEvent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        Task.FromResult<ExternalResponse?>(null);
+
+    // Normalizes the workflow start payload into the compact state object used by the rest of
+    // the graph. In practice this means: prefer the prebuilt RequestStateJson; otherwise fall
+    // back to the raw initial message payload.
+    private sealed class LoadRequestStateExecutor : Executor<CapitalCallWorkflowStart, CapitalCallWorkflowRequestState>
     {
-        if (!requestInfoEvent.Request.TryGetDataAs(typeof(ExternalInputRequest), out var requestValue) ||
-            requestValue is not ExternalInputRequest externalInputRequest)
+        public LoadRequestStateExecutor()
+            : base("load_request_state")
         {
-            return null;
         }
 
-        var functionCall = externalInputRequest.AgentResponse.Messages
-            .SelectMany(message => message.Contents)
-            .OfType<FunctionCallContent>()
-            .FirstOrDefault(content => !string.IsNullOrWhiteSpace(content.Name));
-
-        if (functionCall is null)
+        public override ValueTask<CapitalCallWorkflowRequestState> HandleAsync(
+            CapitalCallWorkflowStart input,
+            IWorkflowContext context,
+            CancellationToken cancellationToken)
         {
-            return null;
+            var requestStateJson = string.IsNullOrWhiteSpace(input.RequestStateJson)
+                ? input.InitialUserMessage
+                : input.RequestStateJson;
+
+            return ValueTask.FromResult(new CapitalCallWorkflowRequestState(
+                input.TenantId,
+                input.ConversationId,
+                input.OperationId,
+                requestStateJson));
         }
-
-        var function = (_agentProvider.Functions ?? Array.Empty<AIFunction>()).FirstOrDefault(candidate =>
-            string.Equals(candidate.Name, functionCall.Name, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException(
-                $"Function '{functionCall.Name}' was requested by the declarative workflow but is not registered.");
-
-        var arguments = new AIFunctionArguments(functionCall.Arguments);
-        var functionResult = await function.InvokeAsync(arguments, cancellationToken);
-
-        var port = RequestPort.Create<ExternalInputRequest, ExternalInputResponse>(requestInfoEvent.Request.PortInfo.PortId);
-        var externalRequest = ExternalRequest.Create(port, externalInputRequest, requestInfoEvent.Request.RequestId);
-        var responseMessage = new ChatMessage(
-            ChatRole.Tool,
-            [new FunctionResultContent(
-                functionCall.CallId ?? requestInfoEvent.Request.RequestId,
-                NormalizeFunctionResult(functionResult))]);
-
-        return externalRequest.CreateResponse(new ExternalInputResponse(responseMessage));
     }
 
-    private static object NormalizeFunctionResult(object? functionResult) =>
-        functionResult switch
-        {
-            null => string.Empty,
-            JsonElement element => NormalizeJsonElement(element),
-            string or bool or byte or short or int or long or float or double or decimal => functionResult,
-            _ => JsonSerializer.Serialize(functionResult)
-        };
+    // Executes the deterministic allocation engine and packages the computed notice DTO into the
+    // review payload that is shown to the human approver before any output artifact is created.
+    private sealed class ComputeCapitalCallAllocationsExecutor : Executor<CapitalCallWorkflowRequestState, CapitalCallAllocationReviewPayload>
+    {
+        private readonly IServiceScopeFactory _serviceScopeFactory;
 
-    private static object NormalizeJsonElement(JsonElement element) =>
-        element.ValueKind switch
+        public ComputeCapitalCallAllocationsExecutor(IServiceScopeFactory serviceScopeFactory)
+            : base("compute_allocations")
         {
-            JsonValueKind.Object or JsonValueKind.Array => element.GetRawText(),
-            JsonValueKind.String => element.GetString() ?? string.Empty,
-            JsonValueKind.Number when element.TryGetInt64(out var int64Value) => int64Value,
-            JsonValueKind.Number when element.TryGetDecimal(out var decimalValue) => decimalValue,
-            JsonValueKind.Number when element.TryGetDouble(out var doubleValue) => doubleValue,
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
-            _ => element.GetRawText()
-        };
+            _serviceScopeFactory = serviceScopeFactory;
+        }
+
+        public override async ValueTask<CapitalCallAllocationReviewPayload> HandleAsync(
+            CapitalCallWorkflowRequestState input,
+            IWorkflowContext context,
+            CancellationToken cancellationToken)
+        {
+            await using var scope = _serviceScopeFactory.CreateAsyncScope();
+            var engine = scope.ServiceProvider.GetRequiredService<ICapitalCallAllocationEngine>();
+            var result = await engine.ComputeAsync(
+                input.TenantId,
+                input.ConversationId,
+                input.RequestStateJson,
+                cancellationToken);
+
+            return new CapitalCallAllocationReviewPayload(
+                input.TenantId,
+                input.ConversationId,
+                input.OperationId,
+                input.RequestStateJson,
+                result.Notice);
+        }
+    }
+
+    // Persists the final user-facing result only after the human has approved the reviewed
+    // allocation payload. The current implementation materializes to an Excel artifact.
+    private sealed class MaterializeCapitalCallResultExecutor : Executor<CapitalCallAllocationReviewPayload, CapitalCallMaterializationResult>
+    {
+        private readonly IServiceScopeFactory _serviceScopeFactory;
+
+        public MaterializeCapitalCallResultExecutor(IServiceScopeFactory serviceScopeFactory)
+            : base("materialize_result")
+        {
+            _serviceScopeFactory = serviceScopeFactory;
+        }
+
+        public override async ValueTask<CapitalCallMaterializationResult> HandleAsync(
+            CapitalCallAllocationReviewPayload input,
+            IWorkflowContext context,
+            CancellationToken cancellationToken)
+        {
+            await using var scope = _serviceScopeFactory.CreateAsyncScope();
+            var materializer = scope.ServiceProvider.GetRequiredService<ICapitalCallResultMaterializer>();
+            return await materializer.MaterializeAsync(
+                input.TenantId,
+                input.ConversationId,
+                input.OperationId,
+                input.RequestStateJson,
+                JsonContent.Serialize(input.Notice),
+                cancellationToken);
+        }
+    }
+
+    // Shared state after loading request data and before running the allocation engine.
+    private sealed record CapitalCallWorkflowRequestState(
+        string TenantId,
+        string ConversationId,
+        string OperationId,
+        string RequestStateJson);
 }

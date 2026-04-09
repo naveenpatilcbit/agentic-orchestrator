@@ -13,6 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.105.0" />
     <PackageReference Include="Microsoft.Agents.AI" Version="1.0.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.0.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows.Declarative" Version="1.0.0-rc6" />
