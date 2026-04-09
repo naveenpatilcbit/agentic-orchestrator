@@ -45,6 +45,7 @@ public sealed class WorkflowPendingRequest
     public string RequestId { get; set; } = string.Empty;
     public string RequestType { get; set; } = string.Empty;
     public string RequestPayloadJson { get; set; } = string.Empty;
+    public string? PromptText { get; set; }
     public string? ResponsePayloadJson { get; set; }
     public WorkflowPendingRequestStatus Status { get; set; } = WorkflowPendingRequestStatus.Open;
     public string? ReviewTaskId { get; set; }

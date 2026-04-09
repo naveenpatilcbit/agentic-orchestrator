@@ -4,6 +4,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);MEAI001;CS8765;CS8610</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,7 +13,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.0.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.0.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows.Declarative" Version="1.0.0-rc6" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.4.0" />
   </ItemGroup>
 
 </Project>

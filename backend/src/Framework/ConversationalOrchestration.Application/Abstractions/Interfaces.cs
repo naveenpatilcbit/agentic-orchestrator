@@ -8,6 +8,7 @@ using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.Application.Support;
 using Microsoft.Agents.AI.Workflows;
+using Microsoft.Extensions.AI;
 
 namespace ConversationalOrchestration.Application.Abstractions;
 
@@ -23,6 +24,25 @@ public interface IConversationMessageRepository
     Task AddAsync(ConversationMessage message, CancellationToken cancellationToken);
     Task UpsertAsync(ConversationMessage message, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<ConversationMessage>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
+}
+
+public interface IConversationHistoryCompactionService
+{
+    Task RefreshAsync(
+        string tenantId,
+        string conversationId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<ChatMessage>> GetReducedConversationHistoryAsync(
+        string tenantId,
+        string conversationId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<ChatMessage>> GetReducedOperationHistoryAsync(
+        string tenantId,
+        string conversationId,
+        string operationId,
+        CancellationToken cancellationToken);
 }
 
 public interface IAgentOperationRepository
@@ -106,6 +126,11 @@ public interface IMessageIntentClassifier
         IReadOnlyCollection<FileAsset> attachments,
         IReadOnlyCollection<AgentDefinition> availableAgents,
         CancellationToken cancellationToken);
+}
+
+public interface ILlmChatClientFactory
+{
+    IChatClient? TryGetChatClient(LlmProfile profile);
 }
 
 /// <summary>
@@ -210,8 +235,11 @@ public interface IWorkflowDefinition
 {
     string Name { get; }
     Type StartInputType { get; }
-    Workflow Build();
+    Workflow Build(WorkflowBuildContext buildContext);
     RequestPortDescriptor ResolveRequestPort(string portId);
+    Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
+        RequestInfoEvent requestInfoEvent,
+        CancellationToken cancellationToken);
 }
 
 public interface IWorkflowRegistry
@@ -260,6 +288,16 @@ public sealed record WorkflowResumeRequest(
     string PendingRequestId,
     string ResponsePayloadJson,
     string? CheckpointId = null);
+
+public sealed record WorkflowBuildContext(
+    string TenantId,
+    string ConversationId,
+    string WorkflowInstanceId,
+    string OperationId);
+
+public sealed record ExternalInputResumePayload(
+    string MessageText,
+    string Role = "user");
 
 public sealed record WorkflowRetryRequest(
     string TenantId,

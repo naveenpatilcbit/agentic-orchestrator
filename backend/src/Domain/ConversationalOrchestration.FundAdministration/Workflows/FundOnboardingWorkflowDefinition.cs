@@ -3,7 +3,7 @@ using Microsoft.Agents.AI.Workflows;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
 
-public static class FundAdministrationWorkflowNames
+public static partial class FundAdministrationWorkflowNames
 {
     public const string FundOnboarding = "fund-onboarding";
 }
@@ -51,7 +51,7 @@ public sealed class FundOnboardingWorkflowDefinition : IWorkflowDefinition
 
     public Type StartInputType => typeof(FundOnboardingWorkflowStart);
 
-    public Workflow Build()
+    public Workflow Build(WorkflowBuildContext buildContext)
     {
         Func<FundOnboardingWorkflowStart, ClassificationReviewPayload> intakeHandler = input =>
             new(
@@ -110,6 +110,11 @@ public sealed class FundOnboardingWorkflowDefinition : IWorkflowDefinition
                 ExtractionReviewPort),
             _ => throw new InvalidOperationException($"Request port '{portId}' is not defined for workflow '{Name}'.")
         };
+
+    public Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
+        RequestInfoEvent requestInfoEvent,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<ExternalResponse?>(null);
 
     private static string InferDocumentType(string fileName)
     {

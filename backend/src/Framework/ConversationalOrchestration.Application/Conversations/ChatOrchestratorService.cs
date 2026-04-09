@@ -20,6 +20,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     private readonly IMessageRoutingService _routingService;
     private readonly IAgentCatalog _agentCatalog;
     private readonly IReviewTaskService _reviewTaskService;
+    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
 
     public ChatOrchestratorService(
         IConversationRepository conversationRepository,
@@ -30,7 +31,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         IFileAssetRepository fileAssetRepository,
         IMessageRoutingService routingService,
         IAgentCatalog agentCatalog,
-        IReviewTaskService reviewTaskService)
+        IReviewTaskService reviewTaskService,
+        IConversationHistoryCompactionService conversationHistoryCompactionService)
     {
         _conversationRepository = conversationRepository;
         _conversationMessageRepository = conversationMessageRepository;
@@ -41,6 +43,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         _routingService = routingService;
         _agentCatalog = agentCatalog;
         _reviewTaskService = reviewTaskService;
+        _conversationHistoryCompactionService = conversationHistoryCompactionService;
     }
 
     public async Task<ConversationSnapshotResponse> HandleMessageAsync(
@@ -61,6 +64,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         };
 
         await _conversationMessageRepository.AddAsync(userMessage, cancellationToken);
+        await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, conversation.Id, cancellationToken);
 
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
@@ -183,6 +187,9 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         };
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
+        conversation.LastFocusedOperationId = operation.Id;
+        conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await _conversationRepository.UpsertAsync(conversation, cancellationToken);
         var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
         var result = await agent.StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
         await PersistAgentResultAsync(conversation, result, context, cancellationToken);
@@ -204,6 +211,9 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         }
 
         var agent = _agentCatalog.Resolve(operation.AgentId);
+        conversation.LastFocusedOperationId = operation.Id;
+        conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await _conversationRepository.UpsertAsync(conversation, cancellationToken);
         var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
         var result = await agent.ContinueAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
         await PersistAgentResultAsync(conversation, result, context, cancellationToken);
@@ -355,6 +365,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     {
         userMessage.OperationId = operationId;
         await _conversationMessageRepository.UpsertAsync(userMessage, cancellationToken);
+        await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, userMessage.ConversationId, cancellationToken);
 
         return await _conversationMessageRepository.ListByConversationAsync(userMessage.ConversationId, context.TenantId, cancellationToken);
     }
@@ -380,6 +391,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 ActionsJson = actions is null ? null : JsonContent.Serialize(actions)
             },
             CancellationToken.None);
+
+        await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, conversationId, CancellationToken.None);
     }
 
     private static ConversationMessageDto MapMessage(ConversationMessage message)

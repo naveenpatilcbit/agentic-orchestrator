@@ -11,7 +11,7 @@ using System.ClientModel;
 
 namespace ConversationalOrchestration.Infrastructure.AI;
 
-public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmClient
+public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmClient, ILlmChatClientFactory
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -70,6 +70,18 @@ public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmCli
             _logger.LogError(exception, "LLM gateway call failed for profile {Profile}.", request.Profile);
             return null;
         }
+    }
+
+    public IChatClient? TryGetChatClient(LlmProfile profile)
+    {
+        var options = _options.Value;
+        var model = ResolveModel(options, profile);
+        if (string.IsNullOrWhiteSpace(options.ApiKey) || string.IsNullOrWhiteSpace(model))
+        {
+            return null;
+        }
+
+        return _chatClients.GetOrAdd(profile, _ => CreateChatClient(options, model));
     }
 
     private IChatClient CreateChatClient(LlmGatewayOptions options, string model)

@@ -5,6 +5,7 @@ using ConversationalOrchestration.Application.Operations;
 using ConversationalOrchestration.Application.Reviews;
 using ConversationalOrchestration.Infrastructure.AI;
 using ConversationalOrchestration.Infrastructure.Configuration;
+using ConversationalOrchestration.Infrastructure.Conversations;
 using ConversationalOrchestration.Infrastructure.Data;
 using ConversationalOrchestration.Infrastructure.Files;
 using ConversationalOrchestration.Infrastructure.Repositories;
@@ -38,9 +39,12 @@ public static class ServiceCollectionExtensions
             return new MongoClient(options.ConnectionString);
         });
 
-        services.AddSingleton<IStructuredLlmClient, MicrosoftExtensionsAiStructuredLlmClient>();
+        services.AddSingleton<MicrosoftExtensionsAiStructuredLlmClient>();
+        services.AddSingleton<IStructuredLlmClient>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
+        services.AddSingleton<ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddScoped<IMessageIntentClassifier, LlmMessageIntentClassifier>();
         services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();
+        services.AddScoped<IConversationHistoryCompactionService, ConversationHistoryCompactionService>();
         services.AddSingleton<MongoCollections>();
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();

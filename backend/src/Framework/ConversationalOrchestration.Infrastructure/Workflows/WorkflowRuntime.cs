@@ -1,6 +1,9 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Domain.Workflows;
+using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows.Declarative.Events;
+using Microsoft.Extensions.AI;
 using System.Text.Json;
 
 namespace ConversationalOrchestration.Infrastructure.Workflows;
@@ -59,8 +62,10 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
         await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
 
-        await using var run = await RunWorkflowAsync(definition, request.Input, instance.Id, cancellationToken);
-        return await PersistRunAsync(definition, instance, run, cancellationToken);
+        var buildContext = CreateBuildContext(instance);
+        await using var run = await RunWorkflowAsync(definition, request.Input, buildContext, cancellationToken);
+        var processingResult = await ProcessRunAsync(definition, instance, run, cancellationToken);
+        return await PersistRunAsync(instance, run, processingResult, cancellationToken);
     }
 
     public async Task<WorkflowRunResult> ResumeAsync(
@@ -88,14 +93,16 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         instance.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
 
+        var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
-        await using var run = await InProcessExecution.ResumeAsync(definition.Build(), checkpoint, _checkpointManager, cancellationToken);
+        await using var run = await InProcessExecution.ResumeAsync(definition.Build(buildContext), checkpoint, _checkpointManager, cancellationToken);
 
         _ = run.NewEvents.ToArray();
         var externalResponse = CreateExternalResponse(definition, pendingRequest);
         await run.ResumeAsync([externalResponse], cancellationToken);
 
-        return await PersistRunAsync(definition, instance, run, cancellationToken);
+        var processingResult = await ProcessRunAsync(definition, instance, run, cancellationToken);
+        return await PersistRunAsync(instance, run, processingResult, cancellationToken);
     }
 
     public async Task<WorkflowRunResult> RetryAsync(
@@ -114,84 +121,150 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         instance.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
 
+        var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
-        await using var run = await InProcessExecution.ResumeAsync(definition.Build(), checkpoint, _checkpointManager, cancellationToken);
-        return await PersistRunAsync(definition, instance, run, cancellationToken);
+        await using var run = await InProcessExecution.ResumeAsync(definition.Build(buildContext), checkpoint, _checkpointManager, cancellationToken);
+        var processingResult = await ProcessRunAsync(definition, instance, run, cancellationToken);
+        return await PersistRunAsync(instance, run, processingResult, cancellationToken);
     }
 
     private async Task<Run> RunWorkflowAsync(
         IWorkflowDefinition definition,
         object input,
-        string sessionId,
+        WorkflowBuildContext buildContext,
         CancellationToken cancellationToken)
     {
         dynamic payload = input;
-        return await InProcessExecution.RunAsync(definition.Build(), payload, _checkpointManager, sessionId, cancellationToken);
+        return await InProcessExecution.RunAsync(definition.Build(buildContext), payload, _checkpointManager, buildContext.WorkflowInstanceId, cancellationToken);
     }
 
-    private async Task<WorkflowRunResult> PersistRunAsync(
+    private async Task<RunProcessingResult> ProcessRunAsync(
         IWorkflowDefinition definition,
         WorkflowInstance instance,
         Run run,
         CancellationToken cancellationToken)
     {
-        var events = run.OutgoingEvents.ToArray();
         var pendingRequests = new List<WorkflowPendingRequest>();
         var outputs = new List<WorkflowOutputMessage>();
         var activatedExecutors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? latestCheckpointId = instance.LatestCheckpointId;
         string? errorMessage = null;
 
-        foreach (var workflowEvent in events)
+        while (true)
         {
-            switch (workflowEvent)
+            var events = run.NewEvents.ToArray();
+            if (events.Length == 0)
             {
-                case RequestInfoEvent requestInfoEvent:
-                {
-                    var pendingRequest = await UpsertPendingRequestAsync(instance, requestInfoEvent, cancellationToken);
-                    pendingRequests.Add(pendingRequest);
-                    break;
-                }
-                case WorkflowOutputEvent outputEvent:
-                {
-                    var data = outputEvent.Data;
-                    if (data is not null)
-                    {
-                        outputs.Add(new WorkflowOutputMessage(
-                            data.GetType().Name,
-                            SerializeValue(data, data.GetType()),
-                            outputEvent.ExecutorId));
-                    }
+                break;
+            }
 
-                    break;
-                }
-                case WorkflowErrorEvent workflowErrorEvent:
-                    errorMessage = workflowErrorEvent.Exception?.Message ?? workflowEvent.ToString();
-                    break;
-                case SuperStepCompletedEvent superStepCompletedEvent:
-                    var completionInfo = superStepCompletedEvent.CompletionInfo;
-                    if (completionInfo?.Checkpoint is not null)
+            var automaticResponses = new List<ExternalResponse>();
+            foreach (var workflowEvent in events)
+            {
+                switch (workflowEvent)
+                {
+                    case RequestInfoEvent requestInfoEvent:
                     {
-                        latestCheckpointId = completionInfo.Checkpoint.CheckpointId;
-                    }
+                        var automaticResponse = await definition.TryCreateAutomaticResponseAsync(
+                            requestInfoEvent,
+                            cancellationToken);
+                        if (automaticResponse is not null)
+                        {
+                            automaticResponses.Add(automaticResponse);
+                            break;
+                        }
 
-                    if (completionInfo is null)
-                    {
+                        var pendingRequest = await UpsertPendingRequestAsync(
+                            definition,
+                            instance,
+                            requestInfoEvent,
+                            cancellationToken);
+                        pendingRequests.Add(pendingRequest);
                         break;
                     }
-
-                    foreach (var executorId in completionInfo.ActivatedExecutors)
+                    case WorkflowOutputEvent outputEvent:
                     {
-                        activatedExecutors.Add(executorId);
-                    }
+                        var data = outputEvent.Data;
+                        if (data is not null)
+                        {
+                            if (data is AgentResponse agentResponse && !string.IsNullOrWhiteSpace(agentResponse.Text))
+                            {
+                                outputs.Add(new WorkflowOutputMessage(
+                                    "MessageActivity",
+                                    SerializeValue(
+                                        new WorkflowActivityPayload(
+                                            agentResponse.Text,
+                                            ChatRole.Assistant.Value),
+                                        typeof(WorkflowActivityPayload)),
+                                    outputEvent.ExecutorId));
+                                break;
+                            }
 
-                    break;
+                            outputs.Add(new WorkflowOutputMessage(
+                                data.GetType().Name,
+                                SerializeValue(data, data.GetType()),
+                                outputEvent.ExecutorId));
+                        }
+
+                        break;
+                    }
+                    case WorkflowErrorEvent workflowErrorEvent:
+                        errorMessage = workflowErrorEvent.Exception?.Message ?? workflowEvent.ToString();
+                        break;
+                    case SuperStepCompletedEvent superStepCompletedEvent:
+                    {
+                        var completionInfo = superStepCompletedEvent.CompletionInfo;
+                        if (completionInfo?.Checkpoint is not null)
+                        {
+                            latestCheckpointId = completionInfo.Checkpoint.CheckpointId;
+                        }
+
+                        if (completionInfo is null)
+                        {
+                            break;
+                        }
+
+                        foreach (var executorId in completionInfo.ActivatedExecutors)
+                        {
+                            activatedExecutors.Add(executorId);
+                        }
+
+                        break;
+                    }
+                }
             }
+
+            if (automaticResponses.Count == 0)
+            {
+                break;
+            }
+
+            await run.ResumeAsync(automaticResponses, cancellationToken);
         }
+
+        return new RunProcessingResult(
+            pendingRequests,
+            outputs,
+            activatedExecutors.ToArray(),
+            latestCheckpointId,
+            errorMessage);
+    }
+
+    private async Task<WorkflowRunResult> PersistRunAsync(
+        WorkflowInstance instance,
+        Run run,
+        RunProcessingResult processingResult,
+        CancellationToken cancellationToken)
+    {
+        var pendingRequests = processingResult.PendingRequests;
+        var outputs = processingResult.Outputs;
+        var activatedExecutors = processingResult.ActivatedExecutors;
+        var latestCheckpointId = processingResult.LatestCheckpointId;
+        var errorMessage = processingResult.ErrorMessage;
 
         var status = await run.GetStatusAsync(cancellationToken);
         instance.LatestCheckpointId = latestCheckpointId;
-        instance.LastPendingRequestId = pendingRequests.LastOrDefault()?.Id;
+        instance.LastPendingRequestId = pendingRequests.LastOrDefault()?.Id ?? instance.LastPendingRequestId;
         instance.UpdatedAtUtc = DateTimeOffset.UtcNow;
         instance.LastError = errorMessage;
         instance.Status = status switch
@@ -212,16 +285,20 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             instance,
             pendingRequests,
             outputs,
-            activatedExecutors.ToArray(),
+            activatedExecutors,
             errorMessage);
     }
 
     private async Task<WorkflowPendingRequest> UpsertPendingRequestAsync(
+        IWorkflowDefinition definition,
         WorkflowInstance instance,
         RequestInfoEvent requestInfoEvent,
         CancellationToken cancellationToken)
     {
-        var requestData = requestInfoEvent.Request.Data;
+        var portDescriptor = definition.ResolveRequestPort(requestInfoEvent.Request.PortInfo.PortId);
+        var requestData = requestInfoEvent.Request.TryGetDataAs(portDescriptor.RequestType, out var typedRequest)
+            ? typedRequest
+            : requestInfoEvent.Request.Data;
         var existing = await _workflowPendingRequestRepository.GetByRequestIdAsync(instance.Id, requestInfoEvent.Request.RequestId, instance.TenantId, cancellationToken);
 
         var pendingRequest = existing ?? new WorkflowPendingRequest
@@ -234,10 +311,11 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
         pendingRequest.PortId = requestInfoEvent.Request.PortInfo.PortId;
         pendingRequest.RequestId = requestInfoEvent.Request.RequestId;
-        pendingRequest.RequestType = requestData?.GetType().Name ?? requestInfoEvent.Request.PortInfo.RequestType.ToString();
+        pendingRequest.RequestType = requestInfoEvent.Request.PortInfo.RequestType.ToString();
         pendingRequest.RequestPayloadJson = requestData is null
             ? "{}"
             : SerializeValue(requestData, requestData.GetType());
+        pendingRequest.PromptText = TryExtractPromptText(requestInfoEvent);
         pendingRequest.Status = WorkflowPendingRequestStatus.Open;
         pendingRequest.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
@@ -251,6 +329,18 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
     {
         var portDescriptor = definition.ResolveRequestPort(pendingRequest.PortId);
         var requestPayload = DeserializeValue(pendingRequest.RequestPayloadJson, portDescriptor.RequestType);
+        if (portDescriptor.ResponseType == typeof(ExternalInputResponse))
+        {
+            var resumePayload = JsonSerializer.Deserialize<ExternalInputResumePayload>(
+                pendingRequest.ResponsePayloadJson ?? "{}",
+                _serializerOptions);
+            var resumableRequest = ExternalRequest.Create(portDescriptor.Port, requestPayload!, pendingRequest.RequestId);
+            var response = new ExternalInputResponse(new ChatMessage(
+                ParseChatRole(resumePayload?.Role),
+                resumePayload?.MessageText ?? string.Empty));
+            return resumableRequest.CreateResponse(response);
+        }
+
         var responsePayload = DeserializeValue(
             pendingRequest.ResponsePayloadJson ?? pendingRequest.RequestPayloadJson,
             portDescriptor.ResponseType);
@@ -259,9 +349,57 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         return externalRequest.CreateResponse(responsePayload!);
     }
 
+    private static WorkflowBuildContext CreateBuildContext(WorkflowInstance instance) =>
+        new(
+            instance.TenantId,
+            instance.ConversationId,
+            instance.Id,
+            instance.OperationId);
+
+    private static string? TryExtractPromptText(RequestInfoEvent requestInfoEvent)
+    {
+        if (!requestInfoEvent.Request.TryGetDataAs(typeof(ExternalInputRequest), out var requestValue) ||
+            requestValue is not ExternalInputRequest externalInputRequest)
+        {
+            return null;
+        }
+
+        var directText = externalInputRequest.AgentResponse.Text;
+        if (!string.IsNullOrWhiteSpace(directText))
+        {
+            return directText;
+        }
+
+        return string.Join(
+            "\n",
+            externalInputRequest.AgentResponse.Messages
+                .Select(message => message.Text)
+                .Where(text => !string.IsNullOrWhiteSpace(text)));
+    }
+
+    private static ChatRole ParseChatRole(string? role) =>
+        role?.Trim().ToLowerInvariant() switch
+        {
+            "assistant" => ChatRole.Assistant,
+            "system" => ChatRole.System,
+            "tool" => ChatRole.Tool,
+            _ => ChatRole.User
+        };
+
     private object? DeserializeValue(string json, Type targetType) =>
         JsonSerializer.Deserialize(json, targetType, _serializerOptions);
 
     private string SerializeValue(object value, Type targetType) =>
         JsonSerializer.Serialize(value, targetType, _serializerOptions);
+
+    private sealed record RunProcessingResult(
+        IReadOnlyCollection<WorkflowPendingRequest> PendingRequests,
+        IReadOnlyCollection<WorkflowOutputMessage> Outputs,
+        IReadOnlyCollection<string> ActivatedExecutors,
+        string? LatestCheckpointId,
+        string? ErrorMessage);
+
+    private sealed record WorkflowActivityPayload(
+        string Text,
+        string Role);
 }

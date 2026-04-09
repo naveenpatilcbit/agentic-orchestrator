@@ -10,11 +10,16 @@ namespace ConversationalOrchestration.Api.Controllers;
 public sealed class FilesController : ControllerBase
 {
     private readonly IFileStorageService _fileStorageService;
+    private readonly IFileAssetRepository _fileAssetRepository;
     private readonly RequestContextAccessor _requestContextAccessor;
 
-    public FilesController(IFileStorageService fileStorageService, RequestContextAccessor requestContextAccessor)
+    public FilesController(
+        IFileStorageService fileStorageService,
+        IFileAssetRepository fileAssetRepository,
+        RequestContextAccessor requestContextAccessor)
     {
         _fileStorageService = fileStorageService;
+        _fileAssetRepository = fileAssetRepository;
         _requestContextAccessor = requestContextAccessor;
     }
 
@@ -53,5 +58,20 @@ public sealed class FilesController : ControllerBase
         }
 
         return Ok(stored);
+    }
+
+    [HttpGet("{fileAssetId}/download")]
+    public async Task<IActionResult> DownloadAsync(
+        string fileAssetId,
+        CancellationToken cancellationToken)
+    {
+        var asset = await _fileAssetRepository.GetAsync(fileAssetId, _requestContextAccessor.Current.TenantId, cancellationToken);
+        if (asset is null || !System.IO.File.Exists(asset.RelativePath))
+        {
+            return NotFound();
+        }
+
+        var stream = System.IO.File.OpenRead(asset.RelativePath);
+        return File(stream, asset.ContentType, asset.FileName);
     }
 }

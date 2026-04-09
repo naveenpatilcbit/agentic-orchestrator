@@ -13,6 +13,9 @@ public sealed class ConversationThread
     public string TenantId { get; set; } = string.Empty;
     public string Title { get; set; } = "New conversation";
     public string? LastFocusedOperationId { get; set; }
+    public string? ReducedHistoryJson { get; set; }
+    public int ReducedHistorySourceCount { get; set; }
+    public DateTimeOffset? ReducedHistoryUpdatedAtUtc { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

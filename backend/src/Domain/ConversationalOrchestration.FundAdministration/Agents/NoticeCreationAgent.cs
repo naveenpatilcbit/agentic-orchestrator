@@ -6,153 +6,165 @@ using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using ConversationalOrchestration.FundAdministration.CapitalCalls;
+using ConversationalOrchestration.FundAdministration.Workflows;
 
 namespace ConversationalOrchestration.FundAdministration.Agents;
 
 public sealed class NoticeCreationAgent : IAgent
 {
-    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> InputFields =
-    [
-        new("fundName", "fund name", "Name of the private equity fund for which the notice draft should be created.", true, "ABC Growth Fund II"),
-        new("amount", "capital call amount", "Amount requested from LPs in the capital call notice.", true, "$5,000,000"),
-        new("noticeDate", "notice date", "Date that should appear on the notice draft.", false, "April 15")
-    ];
+    private readonly IFundAdministrationWorkflowDispatcher _workflowDispatcher;
 
-    private readonly IAgentInputCompletionService _inputCompletionService;
-
-    public NoticeCreationAgent(IAgentInputCompletionService inputCompletionService)
+    public NoticeCreationAgent(IFundAdministrationWorkflowDispatcher workflowDispatcher)
     {
-        _inputCompletionService = inputCompletionService;
+        _workflowDispatcher = workflowDispatcher;
     }
 
     public AgentDefinition Definition { get; } = new(
         FundAdministrationAgentIds.NoticeCreation,
         "Notice Creation Helper",
-        "Creates a draft capital call notice and opens the correct page with prefilled data.",
-        AgentExecutionMode.InlineFunction);
+        "Calculates partner and feeder allocations for a capital call notice, then materializes a draft or downloadable output.",
+        AgentExecutionMode.Workflow);
 
-    public Task<AgentExecutionResult> StartAsync(
+    public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
         IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
-        CancellationToken cancellationToken) =>
-        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        operation.Title = "Capital Call Notice";
+        operation.Status = AgentOperationStatus.Running;
+        operation.CurrentStep = "CapitalCallWorkflow";
+        operation.PendingClarification = null;
+        operation.ActiveReviewTaskId = null;
+        operation.Summary = "Preparing the capital call allocation workflow.";
 
-    public Task<AgentExecutionResult> ContinueAsync(
+        await _workflowDispatcher.StartCapitalCallNoticeAsync(
+            operation,
+            conversation,
+            userMessage.Content,
+            context,
+            cancellationToken);
+
+        return BuildResult(operation);
+    }
+
+    public async Task<AgentExecutionResult> ContinueAsync(
         ConversationThread conversation,
         IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
         AgentOperation operation,
         IReadOnlyCollection<FileAsset> attachments,
         TenantExecutionContext context,
-        CancellationToken cancellationToken) =>
-        ExecuteAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        if (operation.Status != AgentOperationStatus.ClarificationRequired)
+        {
+            return new AgentExecutionResult(
+                "The capital call workflow is already running or completed. Ask for the status if you want a quick summary of the latest state.",
+                operation,
+                [new AgentAction
+                {
+                    Type = AgentActionType.ShowStatus,
+                    Label = "View capital call status",
+                    PayloadJson = JsonContent.Serialize(new { operationId = operation.Id, status = operation.Status.ToString() })
+                }]);
+        }
+
+        await _workflowDispatcher.ContinueCapitalCallNoticeAsync(
+            operation,
+            conversation,
+            userMessage.Content,
+            context,
+            cancellationToken);
+
+        return BuildResult(operation);
+    }
 
     public Task<string> DescribeStatusAsync(
         AgentOperation operation,
         IReadOnlyCollection<ReviewTask> relatedTasks,
         CancellationToken cancellationToken)
     {
-        var status = operation.Status == AgentOperationStatus.Completed
-            ? "Notice draft is ready for review and can be opened directly."
-            : operation.PendingClarification ?? "Waiting for the missing notice details.";
-        return Task.FromResult(status);
+        if (operation.Status == AgentOperationStatus.ClarificationRequired)
+        {
+            return Task.FromResult(operation.PendingClarification ?? "Waiting for additional capital call details.");
+        }
+
+        return Task.FromResult(string.IsNullOrWhiteSpace(operation.Summary)
+            ? "The capital call workflow is active."
+            : operation.Summary);
     }
 
-    private async Task<AgentExecutionResult> ExecuteAsync(
-        IReadOnlyCollection<ConversationMessage> conversationHistory,
-        ConversationMessage userMessage,
-        AgentOperation operation,
-        IReadOnlyCollection<FileAsset> attachments,
-        CancellationToken cancellationToken)
+    private AgentExecutionResult BuildResult(AgentOperation operation)
     {
-        var payload = await CompleteInputsAsync(
-            conversationHistory,
-            userMessage,
-            operation,
-            attachments,
-            cancellationToken);
+        var data = JsonContent.Deserialize<CapitalCallOperationData>(operation.DataJson);
 
-        var fundName = AgentInputStateSupport.GetValue(payload, "fundName");
-        var amount = AgentInputStateSupport.GetValue(payload, "amount");
-        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(InputFields, payload);
-
-        operation.Title = string.IsNullOrWhiteSpace(fundName)
-            ? "Capital Call Draft"
-            : $"Capital Call Draft for {fundName}";
-
-        if (missingRequiredFields.Count > 0)
+        return operation.Status switch
         {
-            operation.Status = AgentOperationStatus.ClarificationRequired;
-            operation.CurrentStep = "CollectNoticeInputs";
-            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(InputFields, missingRequiredFields, "build the notice draft");
-            operation.Summary = "Waiting for the missing notice inputs.";
-            operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
-
-            return new AgentExecutionResult(
-                AgentInputStateSupport.BuildAssistantClarificationMessage(InputFields, missingRequiredFields, "notice creation"),
+            AgentOperationStatus.ClarificationRequired => new AgentExecutionResult(
+                operation.PendingClarification ?? "I need a few more details to calculate the capital call notice.",
                 operation,
                 [new AgentAction
                 {
                     Type = AgentActionType.AskForMoreInfo,
-                    Label = "Provide missing notice details",
-                    PayloadJson = JsonContent.Serialize(new { required = missingRequiredFields })
+                    Label = "Provide clarification",
+                    PayloadJson = JsonContent.Serialize(new { operationId = operation.Id, step = operation.CurrentStep })
                 }],
-                BuildAudit(operation, "NoticeClarificationRequested", payload));
-        }
+                BuildAudit(operation, "CapitalCallClarificationRequested", new { operation.PendingClarification })),
 
-        operation.Status = AgentOperationStatus.Completed;
-        operation.CurrentStep = "DraftReady";
-        operation.PendingClarification = null;
-        operation.Summary = "Created a reversible draft notice with prefilled fund, amount, and notice defaults.";
-        payload["draftRoute"] = $"/funds/{AgentInputStateSupport.Slugify(fundName!)}/capital-call-drafts/{operation.Id}";
-        payload["lpCount"] = "24";
-        payload["defaultNoticeType"] = "Capital Call";
-        operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
-
-        return new AgentExecutionResult(
-            $"I created a draft capital call for {fundName} and prefilled the amount of {amount}. You can open it, review the LP terms, and edit anything before sending.",
-            operation,
-            [
-                new AgentAction
+            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.DraftRoute) => new AgentExecutionResult(
+                $"I calculated the partner allocations for {data.FundName} and created a draft capital call notice in {data.RootCurrency}.",
+                operation,
+                [new AgentAction
                 {
                     Type = AgentActionType.OpenPageWithPrefill,
-                    Label = "Open draft",
-                    Route = payload["draftRoute"],
-                    PayloadJson = JsonContent.Serialize(payload)
-                }
-            ],
-            BuildAudit(operation, "NoticeDraftCreated", payload));
+                    Label = "Open draft notice",
+                    Route = data.DraftRoute,
+                    PayloadJson = JsonContent.Serialize(data)
+                }],
+                BuildAudit(operation, "CapitalCallDraftMaterialized", data)),
+
+            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.DownloadRoute) => new AgentExecutionResult(
+                $"I calculated the partner allocations for {data.FundName} and generated a downloadable output file.",
+                operation,
+                [new AgentAction
+                {
+                    Type = AgentActionType.DownloadArtifact,
+                    Label = "Download allocation output",
+                    Route = data.DownloadRoute,
+                    PayloadJson = JsonContent.Serialize(data)
+                }],
+                BuildAudit(operation, "CapitalCallArtifactMaterialized", data)),
+
+            AgentOperationStatus.Failed => new AgentExecutionResult(
+                $"The capital call workflow hit an error: {operation.Summary}",
+                operation,
+                [new AgentAction
+                {
+                    Type = AgentActionType.ShowStatus,
+                    Label = "Review failure details",
+                    PayloadJson = JsonContent.Serialize(new { operationId = operation.Id, status = operation.Status.ToString() })
+                }],
+                BuildAudit(operation, "CapitalCallWorkflowFailed", new { operation.Summary })),
+
+            _ => new AgentExecutionResult(
+                operation.Summary,
+                operation,
+                [new AgentAction
+                {
+                    Type = AgentActionType.StartAsyncOperation,
+                    Label = "Track capital call workflow",
+                    PayloadJson = JsonContent.Serialize(new { operationId = operation.Id, status = operation.Status.ToString() })
+                }],
+                BuildAudit(operation, "CapitalCallWorkflowProgressed", new { operation.Status, operation.CurrentStep }))
+        };
     }
 
-    private async Task<Dictionary<string, string?>> CompleteInputsAsync(
-        IReadOnlyCollection<ConversationMessage> conversationHistory,
-        ConversationMessage userMessage,
-        AgentOperation operation,
-        IReadOnlyCollection<FileAsset> attachments,
-        CancellationToken cancellationToken)
-    {
-        var currentValues = AgentInputStateSupport.LoadValues(operation);
-        var completion = await _inputCompletionService.CompleteAsync(
-            new AgentInputCompletionRequest(
-                Definition.Id,
-                Definition.DisplayName,
-                operation.CurrentStep,
-                operation.PendingClarification,
-                userMessage.Content,
-                AgentInputStateSupport.GetRelevantConversationHistory(conversationHistory, userMessage, operation),
-                attachments,
-                currentValues,
-                InputFields),
-            cancellationToken);
-
-        return new Dictionary<string, string?>(completion.Values, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, Dictionary<string, string?> payload) =>
+    private static IReadOnlyCollection<AuditEvent> BuildAudit(AgentOperation operation, string eventType, object payload) =>
     [
         new AuditEvent
         {

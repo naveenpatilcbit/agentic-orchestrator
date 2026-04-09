@@ -384,7 +384,7 @@ export default function App() {
                 />
               ))}
               {openReviewTasks.length === 0 ? (
-                <p className="muted">When the onboarding saga pauses for classification or extraction review, it will show up here.</p>
+                <p className="muted">When the onboarding workflow pauses for classification or extraction review, it will show up here.</p>
               ) : null}
             </div>
           </section>
@@ -537,6 +537,12 @@ function MessageCard({
               className={`action-chip tone-${actionTone(action.type)}`}
               onClick={() => {
                 if (action.route) {
+                  if (action.route.startsWith("/api/")) {
+                    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+                    window.open(new URL(action.route, baseUrl).toString(), "_blank", "noopener,noreferrer");
+                    return;
+                  }
+
                   window.alert(`Open route: ${action.route}`);
                 }
               }}

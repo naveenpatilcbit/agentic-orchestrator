@@ -6,11 +6,26 @@ using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
+using ConversationalOrchestration.FundAdministration.CapitalCalls;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
 
 public interface IFundAdministrationWorkflowDispatcher
 {
+    Task StartCapitalCallNoticeAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string initialUserMessage,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken);
+
+    Task ContinueCapitalCallNoticeAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string clarificationMessage,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken);
+
     Task StartOnboardingAsync(
         AgentOperation operation,
         ConversationThread conversation,
@@ -30,27 +45,96 @@ public interface IFundAdministrationWorkflowDispatcher
 
 public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWorkflowDispatcher
 {
+    private readonly ICapitalCallConversationIntelligence _capitalCallConversationIntelligence;
+    private readonly ICapitalCallRequestPreparationService _capitalCallRequestPreparationService;
     private readonly IWorkflowRuntimeService _workflowRuntimeService;
     private readonly IWorkflowPendingRequestRepository _workflowPendingRequestRepository;
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAgentOperationRepository _operationRepository;
     private readonly IConversationMessageRepository _conversationMessageRepository;
     private readonly IAuditEventRepository _auditEventRepository;
+    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
 
     public FundAdministrationWorkflowDispatcher(
+        ICapitalCallConversationIntelligence capitalCallConversationIntelligence,
+        ICapitalCallRequestPreparationService capitalCallRequestPreparationService,
         IWorkflowRuntimeService workflowRuntimeService,
         IWorkflowPendingRequestRepository workflowPendingRequestRepository,
         IReviewTaskRepository reviewTaskRepository,
         IAgentOperationRepository operationRepository,
         IConversationMessageRepository conversationMessageRepository,
-        IAuditEventRepository auditEventRepository)
+        IAuditEventRepository auditEventRepository,
+        IConversationHistoryCompactionService conversationHistoryCompactionService)
     {
+        _capitalCallConversationIntelligence = capitalCallConversationIntelligence;
+        _capitalCallRequestPreparationService = capitalCallRequestPreparationService;
         _workflowRuntimeService = workflowRuntimeService;
         _workflowPendingRequestRepository = workflowPendingRequestRepository;
         _reviewTaskRepository = reviewTaskRepository;
         _operationRepository = operationRepository;
         _conversationMessageRepository = conversationMessageRepository;
         _auditEventRepository = auditEventRepository;
+        _conversationHistoryCompactionService = conversationHistoryCompactionService;
+    }
+
+    public async Task StartCapitalCallNoticeAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string initialUserMessage,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var patch = await _capitalCallConversationIntelligence.CaptureIntentAsync(
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            initialUserMessage,
+            cancellationToken);
+
+        var preparation = await _capitalCallRequestPreparationService.PrepareAsync(
+            context.TenantId,
+            conversation.Id,
+            ExtractCapitalCallRequestStateJson(operation),
+            patch,
+            cancellationToken);
+
+        if (!preparation.IsReady)
+        {
+            await ApplyCapitalCallClarificationStateAsync(operation, preparation, cancellationToken);
+            return;
+        }
+
+        await StartCapitalCallExecutionWorkflowAsync(operation, conversation, preparation, context, cancellationToken);
+    }
+
+    public async Task ContinueCapitalCallNoticeAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        string clarificationMessage,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var patch = await _capitalCallConversationIntelligence.InterpretClarificationAsync(
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            clarificationMessage,
+            cancellationToken);
+
+        var preparation = await _capitalCallRequestPreparationService.PrepareAsync(
+            context.TenantId,
+            conversation.Id,
+            ExtractCapitalCallRequestStateJson(operation),
+            patch,
+            cancellationToken);
+
+        if (!preparation.IsReady)
+        {
+            await ApplyCapitalCallClarificationStateAsync(operation, preparation, cancellationToken);
+            return;
+        }
+
+        await StartCapitalCallExecutionWorkflowAsync(operation, conversation, preparation, context, cancellationToken);
     }
 
     public async Task StartOnboardingAsync(
@@ -214,6 +298,156 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         await _operationRepository.UpsertAsync(operation, cancellationToken);
     }
 
+    private async Task ApplyCapitalCallWorkflowResultAsync(
+        AgentOperation operation,
+        WorkflowRunResult result,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        operation.WorkflowInstanceId = result.Instance.Id;
+        operation.LatestCheckpointId = result.Instance.LatestCheckpointId;
+        operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        if (!string.IsNullOrWhiteSpace(result.ErrorMessage) || result.Instance.Status == WorkflowInstanceStatus.Failed)
+        {
+            operation.Status = AgentOperationStatus.Failed;
+            operation.CurrentStep = result.Instance.CurrentStep;
+            operation.PendingClarification = null;
+            operation.Summary = result.ErrorMessage ?? "The capital call workflow failed before completion.";
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
+            await _auditEventRepository.AddAsync(
+                BuildCapitalCallAuditEvent(operation, "CapitalCallWorkflowFailed", new
+                {
+                    workflowInstanceId = result.Instance.Id,
+                    error = result.ErrorMessage
+                }),
+                cancellationToken);
+            return;
+        }
+
+        if (result.PendingRequests.Count > 0)
+        {
+            var nextRequest = result.PendingRequests.Last();
+            var clarificationPrompt = ResolveCapitalCallClarificationPrompt(result, nextRequest);
+            operation.Status = AgentOperationStatus.ClarificationRequired;
+            operation.CurrentStep = nextRequest.PortId;
+            operation.PendingClarification = clarificationPrompt;
+            operation.ActiveReviewTaskId = null;
+            operation.Summary = "Waiting for additional capital call details in the same chat thread.";
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
+            await _auditEventRepository.AddAsync(
+                BuildCapitalCallAuditEvent(operation, "CapitalCallClarificationRequested", new
+                {
+                    workflowInstanceId = result.Instance.Id,
+                    pendingRequestId = nextRequest.Id,
+                    portId = nextRequest.PortId
+                }),
+                cancellationToken);
+            return;
+        }
+
+        var persistedOperation = await _operationRepository.GetAsync(operation.Id, context.TenantId, cancellationToken);
+        if (persistedOperation is not null && HasWorkflowManagedCapitalCallState(persistedOperation))
+        {
+            CopyOperationState(persistedOperation, operation);
+        }
+        else
+        {
+            operation.Status = result.Instance.Status == WorkflowInstanceStatus.Completed
+                ? AgentOperationStatus.Completed
+                : AgentOperationStatus.Running;
+            operation.CurrentStep = result.Instance.CurrentStep;
+            operation.PendingClarification = null;
+            operation.Summary = string.IsNullOrWhiteSpace(operation.Summary)
+                ? result.Instance.Status == WorkflowInstanceStatus.Completed
+                    ? "The capital call workflow completed successfully."
+                    : "The capital call workflow is running."
+                : operation.Summary;
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
+        }
+
+        await _auditEventRepository.AddAsync(
+            BuildCapitalCallAuditEvent(operation, "CapitalCallWorkflowCompleted", new
+            {
+                workflowInstanceId = result.Instance.Id,
+                checkpointId = result.Instance.LatestCheckpointId
+            }),
+            cancellationToken);
+    }
+
+    private async Task ApplyCapitalCallClarificationStateAsync(
+        AgentOperation operation,
+        CapitalCallPreparationResult preparation,
+        CancellationToken cancellationToken)
+    {
+        operation.Status = AgentOperationStatus.ClarificationRequired;
+        operation.CurrentStep = "CaptureInputs";
+        operation.WorkflowInstanceId = null;
+        operation.LatestCheckpointId = null;
+        operation.PendingClarification = preparation.ClarificationPrompt
+            ?? "I still need the remaining capital call details before I can continue.";
+        operation.ActiveReviewTaskId = null;
+        operation.Summary = "Waiting for additional capital call details in the same chat thread.";
+        operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
+        {
+            Profile = preparation.RequestState.Profile.ToString(),
+            FundName = preparation.RequestState.FundName ?? string.Empty,
+            CapitalCallAmount = preparation.RequestState.CapitalCallAmount ?? 0m,
+            RootCurrency = string.Empty,
+            RequestStateJson = preparation.RequestStateJson
+        });
+
+        await _operationRepository.UpsertAsync(operation, cancellationToken);
+        await _auditEventRepository.AddAsync(
+            BuildCapitalCallAuditEvent(operation, "CapitalCallClarificationRequested", new
+            {
+                clarificationPrompt = operation.PendingClarification,
+                requestStateJson = preparation.RequestStateJson
+            }),
+            cancellationToken);
+    }
+
+    private async Task StartCapitalCallExecutionWorkflowAsync(
+        AgentOperation operation,
+        ConversationThread conversation,
+        CapitalCallPreparationResult preparation,
+        TenantExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        operation.Status = AgentOperationStatus.Running;
+        operation.CurrentStep = "CapitalCallWorkflow";
+        operation.PendingClarification = null;
+        operation.ActiveReviewTaskId = null;
+        operation.Summary = preparation.Summary;
+        operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
+        {
+            Profile = preparation.RequestState.Profile.ToString(),
+            FundName = preparation.RequestState.FundName ?? string.Empty,
+            CapitalCallAmount = preparation.RequestState.CapitalCallAmount ?? 0m,
+            RootCurrency = string.Empty,
+            RequestStateJson = preparation.RequestStateJson
+        });
+
+        var result = await _workflowRuntimeService.StartAsync(
+            new WorkflowStartRequest(
+                context.TenantId,
+                conversation.Id,
+                operation.Id,
+                FundAdministrationWorkflowNames.CapitalCallNotice,
+                new CapitalCallWorkflowStart
+                {
+                    TenantId = context.TenantId,
+                    ConversationId = conversation.Id,
+                    OperationId = operation.Id,
+                    UserId = context.UserId,
+                    InitialUserMessage = preparation.RequestStateJson,
+                    RequestStateJson = preparation.RequestStateJson
+                }),
+            cancellationToken);
+
+        await ApplyCapitalCallWorkflowResultAsync(operation, result, context, cancellationToken);
+    }
+
     private async Task<ReviewTask> EnsureReviewTaskAsync(
         WorkflowPendingRequest pendingRequest,
         CancellationToken cancellationToken)
@@ -271,6 +505,11 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 MessageKind = "workflow"
             },
             cancellationToken);
+
+        await _conversationHistoryCompactionService.RefreshAsync(
+            operation.TenantId,
+            operation.ConversationId,
+            cancellationToken);
     }
 
     private static AuditEvent BuildAuditEvent(AgentOperation operation, string eventType, object payload) =>
@@ -284,4 +523,75 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             ActorId = FundAdministrationWorkflowNames.FundOnboarding,
             DataJson = JsonContent.Serialize(payload)
         };
+
+    private static AuditEvent BuildCapitalCallAuditEvent(AgentOperation operation, string eventType, object payload) =>
+        new()
+        {
+            TenantId = operation.TenantId,
+            ConversationId = operation.ConversationId,
+            OperationId = operation.Id,
+            EventType = eventType,
+            ActorType = "Workflow",
+            ActorId = FundAdministrationWorkflowNames.CapitalCallNotice,
+            DataJson = JsonContent.Serialize(payload)
+        };
+
+    private static void CopyOperationState(AgentOperation source, AgentOperation target)
+    {
+        target.Title = source.Title;
+        target.Status = source.Status;
+        target.CurrentStep = source.CurrentStep;
+        target.Summary = source.Summary;
+        target.PendingClarification = source.PendingClarification;
+        target.ActiveReviewTaskId = source.ActiveReviewTaskId;
+        target.WorkflowInstanceId = source.WorkflowInstanceId;
+        target.LatestCheckpointId = source.LatestCheckpointId;
+        target.DataJson = source.DataJson;
+        target.UpdatedAtUtc = source.UpdatedAtUtc;
+    }
+
+    private static bool HasWorkflowManagedCapitalCallState(AgentOperation operation) =>
+        operation.Status is AgentOperationStatus.Completed or AgentOperationStatus.ClarificationRequired or AgentOperationStatus.Failed
+        || !string.IsNullOrWhiteSpace(operation.WorkflowInstanceId)
+        || !string.IsNullOrWhiteSpace(operation.LatestCheckpointId)
+        || !string.IsNullOrWhiteSpace(operation.DataJson)
+        || !string.IsNullOrWhiteSpace(operation.PendingClarification)
+        || !string.IsNullOrWhiteSpace(operation.Summary)
+        || !string.Equals(operation.CurrentStep, "Intake", StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolveCapitalCallClarificationPrompt(
+        WorkflowRunResult result,
+        WorkflowPendingRequest pendingRequest)
+    {
+        var workflowMessage = result.Outputs
+            .LastOrDefault(output => string.Equals(output.OutputType, "MessageActivity", StringComparison.Ordinal));
+
+        if (workflowMessage is not null)
+        {
+            var payload = JsonContent.Deserialize<WorkflowActivityMessage>(workflowMessage.PayloadJson);
+            if (!string.IsNullOrWhiteSpace(payload?.Text))
+            {
+                return payload.Text;
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(pendingRequest.PromptText)
+            ? pendingRequest.PromptText
+            : "I still need the missing capital call details before I can calculate the capital call allocations.";
+    }
+
+    private static string ExtractCapitalCallRequestStateJson(AgentOperation operation)
+    {
+        if (string.IsNullOrWhiteSpace(operation.DataJson))
+        {
+            return "{}";
+        }
+
+        var data = JsonContent.Deserialize<CapitalCallOperationData>(operation.DataJson);
+        return string.IsNullOrWhiteSpace(data?.RequestStateJson)
+            ? "{}"
+            : data.RequestStateJson;
+    }
+
+    private sealed record WorkflowActivityMessage(string Text, string Role);
 }
