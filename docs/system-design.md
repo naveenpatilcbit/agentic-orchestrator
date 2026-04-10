@@ -832,6 +832,11 @@ Recovery should happen from persisted operation and review state, not by replayi
 
 - `POST /api/files/upload`
 
+Conversation snapshots return files as typed assets so the UI can distinguish:
+
+- `UploadedInput`
+- `GeneratedArtifact`
+
 ## 14. Current Implementation Mapping
 
 ### Backend

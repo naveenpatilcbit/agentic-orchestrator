@@ -22,6 +22,7 @@ public sealed class LocalFileStorageService : IFileStorageService
         string fileName,
         string contentType,
         string conversationId,
+        FileAssetKind kind,
         TenantExecutionContext context,
         CancellationToken cancellationToken)
     {
@@ -42,6 +43,7 @@ public sealed class LocalFileStorageService : IFileStorageService
             FileName = fileName,
             ContentType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
             RelativePath = fullPath,
+            Kind = kind,
             SizeBytes = new FileInfo(fullPath).Length
         };
 

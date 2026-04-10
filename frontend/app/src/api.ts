@@ -66,16 +66,20 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 export async function submitReviewDecision(
   reviewTaskId: string,
   action: string,
-  finalPayloadJson?: string | null,
-  notes?: string | null,
+  options?: {
+    finalPayloadJson?: string | null;
+    changeRequestText?: string | null;
+    notes?: string | null;
+  },
 ): Promise<ConversationSnapshot> {
   const response = await fetch(`${API_BASE}/api/reviews/${reviewTaskId}/decision`, {
     method: "POST",
     headers: defaultHeaders,
     body: JSON.stringify({
       action,
-      finalPayloadJson,
-      notes: notes ?? `Submitted from sample UI as ${action}`,
+      finalPayloadJson: options?.finalPayloadJson,
+      changeRequestText: options?.changeRequestText,
+      notes: options?.notes ?? `Submitted from sample UI as ${action}`,
     }),
   });
 

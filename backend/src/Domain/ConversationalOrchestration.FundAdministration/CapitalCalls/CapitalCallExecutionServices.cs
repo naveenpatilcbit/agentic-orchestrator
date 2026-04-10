@@ -24,7 +24,7 @@ public interface ICapitalCallAllocationEngine
     Task<CapitalCallComputationResult> ComputeAsync(
         string tenantId,
         string conversationId,
-        string reviewedExtractionJson,
+        CapitalCallExtractionReviewPayload reviewedExtraction,
         CancellationToken cancellationToken);
 }
 
@@ -34,7 +34,7 @@ public interface ICapitalCallReviewArtifactService
         string tenantId,
         string conversationId,
         string operationId,
-        string extractionReviewPayloadJson,
+        CapitalCallExtractionReviewPayload extractionReviewPayload,
         CancellationToken cancellationToken);
 }
 
@@ -44,7 +44,7 @@ public interface ICapitalCallExtractionReviewService
         string tenantId,
         string conversationId,
         string operationId,
-        string requestStateJson,
+        CapitalCallRequestState requestState,
         CancellationToken cancellationToken);
 }
 
@@ -173,7 +173,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
             {
                 IsReady = false,
                 RequestState = state,
-                RequestStateJson = JsonContent.Serialize(state),
                 ClarificationPrompt = $"I still need the {string.Join(" and ", missing)} before I can calculate the capital call allocations.",
                 Summary = "Waiting for the remaining capital call inputs."
             };
@@ -190,7 +189,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
             {
                 IsReady = false,
                 RequestState = state,
-                RequestStateJson = JsonContent.Serialize(state),
                 ClarificationPrompt = sourceResolutionIssue,
                 Summary = "Waiting for a configured provider or uploaded source file."
             };
@@ -209,7 +207,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
             {
                 IsReady = false,
                 RequestState = state,
-                RequestStateJson = JsonContent.Serialize(state),
                 ClarificationPrompt = $"I found the attachment '{state.SourceAttachmentName}', but this demo expects a CSV export for attachment-driven capital calls. Use a file with columns like {AttachmentPromptSamples["csv"]}.",
                 Summary = "Waiting for a CSV attachment with partner commitment data."
             };
@@ -229,7 +226,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
             {
                 IsReady = false,
                 RequestState = state,
-                RequestStateJson = JsonContent.Serialize(state),
                 ClarificationPrompt = state.Profile == CapitalCallExecutionProfile.AttachmentFile
                     ? $"I couldn't find a fund named '{state.FundName}' in the uploaded source file. Please confirm the fund name or upload a corrected CSV."
                     : $"I couldn't find a fund named '{state.FundName}' in the configured provider. Please upload a CSV file with partner names, feeder details, and commitment percentages so I can calculate the capital call notice.",
@@ -262,7 +258,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
             {
                 IsReady = false,
                 RequestState = state,
-                RequestStateJson = JsonContent.Serialize(state),
                 ClarificationPrompt = validationIssue,
                 Summary = "Waiting for clarification before the allocation engine can continue."
             };
@@ -280,7 +275,6 @@ public sealed class CapitalCallRequestPreparationService : ICapitalCallRequestPr
         {
             IsReady = true,
             RequestState = state,
-            RequestStateJson = JsonContent.Serialize(state),
             Summary = $"Ready to calculate {CapitalCallFormatting.FormatAmount(state.CapitalCallAmount!.Value, rootFund.Currency)} for {rootFund.FundName}."
         };
     }
@@ -506,18 +500,16 @@ public sealed class CapitalCallExtractionReviewService : ICapitalCallExtractionR
         string tenantId,
         string conversationId,
         string operationId,
-        string requestStateJson,
+        CapitalCallRequestState requestState,
         CancellationToken cancellationToken)
     {
-        var state = JsonContent.Deserialize<CapitalCallRequestState>(requestStateJson)
-            ?? throw new InvalidOperationException("Capital call request state is missing.");
-        var provider = _dataProviders.FirstOrDefault(candidate => candidate.CanHandle(state.Profile))
-            ?? throw new InvalidOperationException($"No capital call data provider is registered for profile '{state.Profile}'.");
+        var provider = _dataProviders.FirstOrDefault(candidate => candidate.CanHandle(requestState.Profile))
+            ?? throw new InvalidOperationException($"No capital call data provider is registered for profile '{requestState.Profile}'.");
         var rootFund = await provider.GetFundAsync(
             tenantId,
             conversationId,
-            state,
-            state.FundId ?? throw new InvalidOperationException("Capital call state is missing the resolved fund id."),
+            requestState,
+            requestState.FundId ?? throw new InvalidOperationException("Capital call state is missing the resolved fund id."),
             cancellationToken)
             ?? throw new InvalidOperationException("The root fund could not be loaded.");
 
@@ -534,10 +526,10 @@ public sealed class CapitalCallExtractionReviewService : ICapitalCallExtractionR
             TenantId = tenantId,
             ConversationId = conversationId,
             OperationId = operationId,
-            RequestStateJson = requestStateJson,
+            RequestState = requestState,
             RootFund = await BuildFundNodeAsync(
                 provider,
-                state,
+                requestState,
                 tenantId,
                 conversationId,
                 rootFund,
@@ -577,6 +569,8 @@ public sealed class CapitalCallExtractionReviewService : ICapitalCallExtractionR
             Path = path
         };
 
+        // The review tree reflects provider data plus any user overrides that were already captured
+        // during chat intake, so the reviewer sees the exact inputs the allocator will use later.
         foreach (var partner in fund.Partners.OrderBy(partner => partner.PartnerName, StringComparer.OrdinalIgnoreCase))
         {
             var partnerNode = new CapitalCallReviewPartnerNode
@@ -633,13 +627,16 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
     public async Task<CapitalCallComputationResult> ComputeAsync(
         string tenantId,
         string conversationId,
-        string reviewedExtractionJson,
+        CapitalCallExtractionReviewPayload reviewedExtraction,
         CancellationToken cancellationToken)
     {
-        var reviewPayload = JsonContent.Deserialize<CapitalCallExtractionReviewPayload>(reviewedExtractionJson)
-            ?? throw new InvalidOperationException("Capital call extraction review payload is missing.");
-        var state = JsonContent.Deserialize<CapitalCallRequestState>(reviewPayload.RequestStateJson)
+        var reviewPayload = reviewedExtraction ?? throw new InvalidOperationException("Capital call extraction review payload is missing.");
+        var state = reviewPayload.RequestState
             ?? throw new InvalidOperationException("Capital call request state is missing.");
+        if (!state.CapitalCallAmount.HasValue || state.CapitalCallAmount.Value <= 0)
+        {
+            throw new InvalidOperationException("The reviewed capital call payload is missing a valid capital call amount. Reopen the review task and keep the original request state fields intact.");
+        }
         _logger.LogInformation(
             "Starting capital call allocation for tenant {TenantId} conversation {ConversationId}. RootFundId={FundId} FundName={FundName} Amount={Amount}",
             tenantId,
@@ -652,7 +649,7 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             tenantId,
             conversationId,
             reviewPayload.RootFund,
-            state.CapitalCallAmount!.Value,
+            state.CapitalCallAmount.Value,
             [],
             0,
             cancellationToken);
@@ -675,11 +672,7 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
 
         return new CapitalCallComputationResult
         {
-            Notice = notice,
-            NoticeDtoJson = JsonContent.Serialize(notice),
-            RootFundName = reviewPayload.RootFund.FundName,
-            RootCurrency = reviewPayload.RootFund.FundCurrency,
-            RootCapitalCallAmount = state.CapitalCallAmount.Value
+            Notice = notice
         };
     }
 
@@ -731,6 +724,8 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
             .ToArray();
 
         var partnerAllocations = new List<CapitalCallPartnerAllocation>(sortedPartners.Length);
+        // Sorting first gives us deterministic rounding behavior. The final balance adjustment is
+        // always applied to the last partner in that stable order.
         var rawAllocations = sortedPartners
             .Select(partner => new
             {
@@ -767,6 +762,8 @@ public sealed class CapitalCallAllocationEngine : ICapitalCallAllocationEngine
                 var childFund = allocation.Partner.ChildFund
                     ?? throw new InvalidOperationException($"The child fund for {allocation.Partner.PartnerName} could not be loaded.");
 
+                // FX conversion only happens when the obligation crosses into a child fund. Once
+                // inside that fund, the next round of partner allocations is calculated locally.
                 var childAmount = await _fxRateProvider.ConvertAsync(
                     allocation.Amount,
                     fund.FundCurrency,
@@ -871,10 +868,10 @@ public sealed class CapitalCallReviewArtifactService : ICapitalCallReviewArtifac
         string tenantId,
         string conversationId,
         string operationId,
-        string extractionReviewPayloadJson,
+        CapitalCallExtractionReviewPayload extractionReviewPayload,
         CancellationToken cancellationToken)
     {
-        var reviewPayload = JsonContent.Deserialize<CapitalCallExtractionReviewPayload>(extractionReviewPayloadJson)
+        var reviewPayload = extractionReviewPayload
             ?? throw new InvalidOperationException("Capital call extraction review payload could not be loaded for review artifact creation.");
 
         await using var stream = CapitalCallWorkbookBuilder.BuildExtractionReviewWorkbookStream(reviewPayload);
@@ -884,6 +881,7 @@ public sealed class CapitalCallReviewArtifactService : ICapitalCallReviewArtifac
             fileName,
             ExcelContentType,
             conversationId,
+            FileAssetKind.GeneratedArtifact,
             new TenantExecutionContext(tenantId, "workflow", "Capital Call Review Artifact"),
             cancellationToken);
 
@@ -897,7 +895,6 @@ public sealed class CapitalCallReviewArtifactService : ICapitalCallReviewArtifac
 
         return new CapitalCallReviewArtifactResult
         {
-            FileAssetId = file.Id,
             DownloadRoute = downloadRoute,
             FileName = file.FileName
         };
@@ -973,7 +970,7 @@ public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSour
     {
         var data = JsonContent.Deserialize<CapitalCallOperationData>(sourceOperation.DataJson)
             ?? throw new InvalidOperationException("The source capital call operation does not contain any approved allocation data.");
-        var notice = JsonContent.Deserialize<CapitalCallNoticeDto>(data.NoticeDtoJson)
+        var notice = data.Notice
             ?? throw new InvalidOperationException("The source capital call operation does not contain a valid reviewed capital call payload.");
 
         await using var stream = CapitalCallWorkbookBuilder.BuildWorkbookStream(notice);
@@ -983,6 +980,7 @@ public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSour
             fileName,
             ExcelContentType,
             conversationId,
+            FileAssetKind.GeneratedArtifact,
             new TenantExecutionContext(sourceOperation.TenantId, "workflow", "Template Output Operation"),
             cancellationToken);
 

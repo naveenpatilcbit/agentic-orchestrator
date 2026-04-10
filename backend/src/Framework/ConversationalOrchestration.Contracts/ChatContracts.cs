@@ -66,10 +66,12 @@ public sealed record FileAssetDto(
     string ConversationId,
     string FileName,
     string ContentType,
+    string Kind,
     long SizeBytes,
     DateTimeOffset UploadedAtUtc);
 
 public sealed record ReviewDecisionRequest(
     string Action,
     string? FinalPayloadJson,
+    string? ChangeRequestText,
     string? Notes);

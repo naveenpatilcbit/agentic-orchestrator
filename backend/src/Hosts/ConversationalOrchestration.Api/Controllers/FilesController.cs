@@ -1,6 +1,7 @@
 using ConversationalOrchestration.Api.Models;
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Contracts;
+using ConversationalOrchestration.Domain.Files;
 using Microsoft.AspNetCore.Mvc;
 
 namespace ConversationalOrchestration.Api.Controllers;
@@ -45,6 +46,7 @@ public sealed class FilesController : ControllerBase
                 file.FileName,
                 file.ContentType,
                 conversationId,
+                FileAssetKind.UploadedInput,
                 _requestContextAccessor.Current,
                 cancellationToken);
 
@@ -53,6 +55,7 @@ public sealed class FilesController : ControllerBase
                 asset.ConversationId,
                 asset.FileName,
                 asset.ContentType,
+                asset.Kind.ToString(),
                 asset.SizeBytes,
                 asset.UploadedAtUtc));
         }

@@ -119,6 +119,9 @@ public sealed class MicrosoftExtensionsAiStructuredLlmClient : IStructuredLlmCli
         {
             LlmProfile.Routing => options.RoutingModel,
             LlmProfile.InputCompletion => options.InputCompletionModel,
+            LlmProfile.ReviewRevision => string.IsNullOrWhiteSpace(options.InputCompletionModel)
+                ? options.RoutingModel
+                : options.InputCompletionModel,
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported LLM profile.")
         };
 

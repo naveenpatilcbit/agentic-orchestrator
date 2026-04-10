@@ -111,7 +111,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         var preparation = await _capitalCallRequestPreparationService.PrepareAsync(
             context.TenantId,
             conversation.Id,
-            ExtractCapitalCallRequestStateJson(operation),
+            SerializeCapitalCallRequestState(operation),
             patch,
             cancellationToken);
 
@@ -150,7 +150,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         var preparation = await _capitalCallRequestPreparationService.PrepareAsync(
             context.TenantId,
             conversation.Id,
-            ExtractCapitalCallRequestStateJson(operation),
+            SerializeCapitalCallRequestState(operation),
             patch,
             cancellationToken);
 
@@ -219,7 +219,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             operation.Id,
             attachments.Count);
         var result = await _workflowRuntimeService.StartAsync(
-            new WorkflowStartRequest(
+            new WorkflowStartRequest<FundOnboardingWorkflowStart>(
                 context.TenantId,
                 conversation.Id,
                 operation.Id,
@@ -364,8 +364,10 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             .FirstOrDefault(output => string.Equals(output.OutputType, nameof(FundOnboardingWorkflowCompleted), StringComparison.Ordinal));
         if (completion is not null)
         {
-            var completedPayload = JsonContent.Deserialize<FundOnboardingWorkflowCompleted>(completion.PayloadJson)
-                ?? throw new InvalidOperationException("Workflow completion payload could not be parsed.");
+            if (!completion.TryGetPayload<FundOnboardingWorkflowCompleted>(out var completedPayload) || completedPayload is null)
+            {
+                throw new InvalidOperationException("Workflow completion payload could not be parsed.");
+            }
             _logger.LogInformation(
                 "Onboarding workflow completed for tenant {TenantId} conversation {ConversationId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} FundName={FundName}",
                 context.TenantId,
@@ -512,25 +514,26 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             .FirstOrDefault(output => string.Equals(output.OutputType, nameof(CapitalCallWorkflowCompleted), StringComparison.Ordinal));
         if (completion is not null)
         {
-            var completedPayload = JsonContent.Deserialize<CapitalCallWorkflowCompleted>(completion.PayloadJson)
-                ?? throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
+            if (!completion.TryGetPayload<CapitalCallWorkflowCompleted>(out var completedPayload) || completedPayload is null)
+            {
+                throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
+            }
 
             operation.Status = AgentOperationStatus.Completed;
             operation.CurrentStep = "ReviewedDataReady";
             operation.PendingClarification = null;
             operation.ActiveReviewTaskId = null;
             operation.Summary = "Reviewed capital call allocations are approved and ready for a template output operation.";
+            // Keep the approved typed workflow output on the operation so downstream agents, like
+            // template rendering, do not need to recompute or reinterpret the workflow result.
             operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
             {
-                RequestStateJson = completedPayload.RequestStateJson,
-                ReviewedExtractionJson = completedPayload.ReviewedExtractionJson,
-                FundName = completedPayload.FundName,
-                CapitalCallAmount = completedPayload.RootCapitalCallAmount,
-                RootCurrency = completedPayload.RootCurrency,
-                NoticeDtoJson = completedPayload.NoticeDtoJson,
-                ReviewFileAssetId = completedPayload.ReviewFileAssetId,
-                ReviewDownloadRoute = completedPayload.ReviewDownloadRoute,
-                ReviewFileName = completedPayload.ReviewFileName
+                RequestState = completedPayload.ReviewedExtraction.RequestState,
+                ReviewedExtraction = completedPayload.ReviewedExtraction,
+                FundName = completedPayload.Notice.RootFundName,
+                Notice = completedPayload.Notice,
+                ReviewDownloadRoute = completedPayload.ReviewedExtraction.ReviewDownloadRoute,
+                ReviewFileName = completedPayload.ReviewedExtraction.ReviewFileName
             });
             await _operationRepository.UpsertAsync(operation, cancellationToken);
             await AddConversationUpdateAsync(
@@ -598,11 +601,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         operation.Summary = "Waiting for additional capital call details in the same chat thread.";
         operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
         {
-            Profile = preparation.RequestState.Profile.ToString(),
             FundName = preparation.RequestState.FundName ?? string.Empty,
-            CapitalCallAmount = preparation.RequestState.CapitalCallAmount ?? 0m,
-            RootCurrency = string.Empty,
-            RequestStateJson = preparation.RequestStateJson
+            RequestState = preparation.RequestState
         });
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
@@ -610,7 +610,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             BuildCapitalCallAuditEvent(operation, "CapitalCallClarificationRequested", new
             {
                 clarificationPrompt = operation.PendingClarification,
-                requestStateJson = preparation.RequestStateJson
+                requestState = preparation.RequestState
             }),
             cancellationToken);
     }
@@ -635,17 +635,16 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         operation.PendingClarification = null;
         operation.ActiveReviewTaskId = null;
         operation.Summary = preparation.Summary;
+        // Persist the normalized request state on the operation before the workflow starts so the
+        // same state can survive clarification loops, review round-trips, and later template output.
         operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
         {
-            Profile = preparation.RequestState.Profile.ToString(),
             FundName = preparation.RequestState.FundName ?? string.Empty,
-            CapitalCallAmount = preparation.RequestState.CapitalCallAmount ?? 0m,
-            RootCurrency = string.Empty,
-            RequestStateJson = preparation.RequestStateJson
+            RequestState = preparation.RequestState
         });
 
          var result = await _workflowRuntimeService.StartAsync(
-            new WorkflowStartRequest(
+            new WorkflowStartRequest<CapitalCallWorkflowStart>(
                 context.TenantId,
                 conversation.Id,
                 operation.Id,
@@ -655,9 +654,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                     TenantId = context.TenantId,
                     ConversationId = conversation.Id,
                     OperationId = operation.Id,
-                    UserId = context.UserId,
-                    InitialUserMessage = preparation.RequestStateJson,
-                    RequestStateJson = preparation.RequestStateJson
+                    RequestState = preparation.RequestState
                 }),
             cancellationToken);
 
@@ -689,6 +686,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             }
         }
 
+        // The workflow runtime stores a generic pending request. The review task is the product-
+        // facing projection of that request that the UI can render and the user can act on.
         var reviewTask = new ReviewTask
         {
             TenantId = pendingRequest.TenantId,
@@ -795,8 +794,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
 
         if (workflowMessage is not null)
         {
-            var payload = JsonContent.Deserialize<WorkflowActivityMessage>(workflowMessage.PayloadJson);
-            if (!string.IsNullOrWhiteSpace(payload?.Text))
+            if (workflowMessage.TryGetPayload<WorkflowActivityMessage>(out var payload) &&
+                !string.IsNullOrWhiteSpace(payload?.Text))
             {
                 return payload.Text;
             }
@@ -841,7 +840,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             _ => null
         };
 
-    private static string ExtractCapitalCallRequestStateJson(AgentOperation operation)
+    private static string SerializeCapitalCallRequestState(AgentOperation operation)
     {
         if (string.IsNullOrWhiteSpace(operation.DataJson))
         {
@@ -849,9 +848,9 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         }
 
         var data = JsonContent.Deserialize<CapitalCallOperationData>(operation.DataJson);
-        return string.IsNullOrWhiteSpace(data?.RequestStateJson)
+        return data?.RequestState is null
             ? "{}"
-            : data.RequestStateJson;
+            : JsonContent.Serialize(data.RequestState);
     }
 
     private sealed record WorkflowActivityMessage(string Text, string Role);

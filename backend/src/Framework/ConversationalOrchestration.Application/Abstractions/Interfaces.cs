@@ -95,6 +95,7 @@ public interface IFileStorageService
         string fileName,
         string contentType,
         string conversationId,
+        FileAssetKind kind,
         TenantExecutionContext context,
         CancellationToken cancellationToken);
 }
@@ -222,6 +223,15 @@ public interface IReviewTaskService
         CancellationToken cancellationToken);
 }
 
+public interface IReviewPayloadRevisionService
+{
+    Task<ReviewPayloadRevisionResult> ReviseAsync(
+        ReviewTask reviewTask,
+        string currentPayloadJson,
+        string changeRequestText,
+        CancellationToken cancellationToken);
+}
+
 public interface IReviewContinuationHandler
 {
     bool CanHandle(AgentOperation operation, ReviewTask reviewTask);
@@ -249,9 +259,10 @@ public interface IWorkflowRegistry
 
 public interface IWorkflowRuntimeService
 {
-    Task<WorkflowRunResult> StartAsync(
-        WorkflowStartRequest request,
-        CancellationToken cancellationToken);
+    Task<WorkflowRunResult> StartAsync<TInput>(
+        WorkflowStartRequest<TInput> request,
+        CancellationToken cancellationToken)
+        where TInput : notnull;
 
     Task<WorkflowRunResult> ResumeAsync(
         WorkflowResumeRequest request,
@@ -274,13 +285,14 @@ public sealed record RequestPortDescriptor(
     Type ResponseType,
     RequestPort Port);
 
-public sealed record WorkflowStartRequest(
+public sealed record WorkflowStartRequest<TInput>(
     string TenantId,
     string ConversationId,
     string OperationId,
     string WorkflowName,
-    object Input,
-    string? WorkflowInstanceId = null);
+    TInput Input,
+    string? WorkflowInstanceId = null)
+    where TInput : notnull;
 
 public sealed record WorkflowResumeRequest(
     string TenantId,
@@ -306,8 +318,22 @@ public sealed record WorkflowRetryRequest(
 
 public sealed record WorkflowOutputMessage(
     string OutputType,
+    object? Payload,
     string PayloadJson,
-    string? SourceId = null);
+    string? SourceId = null)
+{
+    public bool TryGetPayload<TPayload>(out TPayload? payload)
+    {
+        if (Payload is TPayload typedPayload)
+        {
+            payload = typedPayload;
+            return true;
+        }
+
+        payload = JsonContent.Deserialize<TPayload>(PayloadJson);
+        return payload is not null;
+    }
+}
 
 public sealed record WorkflowRunResult(
     WorkflowInstance Instance,
@@ -343,3 +369,9 @@ public sealed record ChatInteractionResult(
     string AssistantMessage,
     string ConversationId,
     string? OperationId = null);
+
+public sealed record ReviewPayloadRevisionResult(
+    bool Success,
+    string? RevisedPayloadJson = null,
+    string? ClarificationPrompt = null,
+    string? Summary = null);

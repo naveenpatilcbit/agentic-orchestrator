@@ -50,7 +50,6 @@ public sealed class CapitalCallPreparationResult
 {
     public bool IsReady { get; set; }
     public CapitalCallRequestState RequestState { get; set; } = new();
-    public string RequestStateJson { get; set; } = "{}";
     public string? ClarificationPrompt { get; set; }
     public string Summary { get; set; } = string.Empty;
 }
@@ -66,14 +65,11 @@ public sealed class CapitalCallWorkflowStart
     public string TenantId { get; init; } = string.Empty;
     public string ConversationId { get; init; } = string.Empty;
     public string OperationId { get; init; } = string.Empty;
-    public string UserId { get; init; } = string.Empty;
-    public string InitialUserMessage { get; init; } = string.Empty;
-    public string RequestStateJson { get; init; } = "{}";
+    public CapitalCallRequestState RequestState { get; init; } = new();
 }
 
 public sealed class CapitalCallReviewArtifactResult
 {
-    public string FileAssetId { get; set; } = string.Empty;
     public string DownloadRoute { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
 }
@@ -89,14 +85,10 @@ public sealed class TemplateOutputGenerationResult
 
 public sealed class CapitalCallOperationData
 {
-    public string Profile { get; set; } = CapitalCallExecutionProfile.SaaS.ToString();
     public string FundName { get; set; } = string.Empty;
-    public decimal CapitalCallAmount { get; set; }
-    public string RootCurrency { get; set; } = string.Empty;
-    public string? RequestStateJson { get; set; }
-    public string? ReviewedExtractionJson { get; set; }
-    public string NoticeDtoJson { get; set; } = "{}";
-    public string? ReviewFileAssetId { get; set; }
+    public CapitalCallRequestState? RequestState { get; set; }
+    public CapitalCallExtractionReviewPayload? ReviewedExtraction { get; set; }
+    public CapitalCallNoticeDto? Notice { get; set; }
     public string? ReviewDownloadRoute { get; set; }
     public string? ReviewFileName { get; set; }
 }
@@ -106,9 +98,8 @@ public sealed class CapitalCallExtractionReviewPayload
     public string TenantId { get; set; } = string.Empty;
     public string ConversationId { get; set; } = string.Empty;
     public string OperationId { get; set; } = string.Empty;
-    public string RequestStateJson { get; set; } = "{}";
+    public CapitalCallRequestState RequestState { get; set; } = new();
     public CapitalCallReviewFundNode RootFund { get; set; } = new();
-    public string? ReviewFileAssetId { get; set; }
     public string? ReviewDownloadRoute { get; set; }
     public string? ReviewFileName { get; set; }
 }
@@ -194,10 +185,6 @@ public sealed class CapitalCallLeafAllocation
 public sealed class CapitalCallComputationResult
 {
     public CapitalCallNoticeDto Notice { get; set; } = new();
-    public string NoticeDtoJson { get; set; } = "{}";
-    public string RootFundName { get; set; } = string.Empty;
-    public string RootCurrency { get; set; } = string.Empty;
-    public decimal RootCapitalCallAmount { get; set; }
 }
 
 internal sealed class CapitalCallTraversalResult

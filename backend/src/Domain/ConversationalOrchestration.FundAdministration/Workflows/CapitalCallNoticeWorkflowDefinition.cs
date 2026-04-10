@@ -1,5 +1,4 @@
 using ConversationalOrchestration.Application.Abstractions;
-using ConversationalOrchestration.Application.Support;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Agents.AI.Workflows.Declarative.Events;
@@ -18,15 +17,8 @@ public static class CapitalCallNoticeWorkflowPorts
 }
 
 public sealed record CapitalCallWorkflowCompleted(
-    string RequestStateJson,
-    string ReviewedExtractionJson,
-    string NoticeDtoJson,
-    string FundName,
-    string RootCurrency,
-    decimal RootCapitalCallAmount,
-    string? ReviewFileAssetId,
-    string? ReviewDownloadRoute,
-    string? ReviewFileName);
+    CapitalCallExtractionReviewPayload ReviewedExtraction,
+    CapitalCallNoticeDto Notice);
 
 public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 {
@@ -83,9 +75,9 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         CancellationToken cancellationToken) =>
         Task.FromResult<ExternalResponse?>(null);
 
-    // Normalizes the workflow start payload into the compact state object used by the rest of
-    // the graph. In practice this means: prefer the prebuilt RequestStateJson; otherwise fall
-    // back to the raw initial message payload.
+    // Normalizes the strongly typed workflow start payload into the compact state object used by
+    // the rest of the graph. By the time the workflow starts, chat intake has already resolved the
+    // canonical capital call request state.
     private sealed class LoadRequestStateExecutor : Executor<CapitalCallWorkflowStart, CapitalCallWorkflowRequestState>
     {
         public LoadRequestStateExecutor()
@@ -97,17 +89,11 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             CapitalCallWorkflowStart input,
             IWorkflowContext context,
             CancellationToken cancellationToken)
-        {
-            var requestStateJson = string.IsNullOrWhiteSpace(input.RequestStateJson)
-                ? input.InitialUserMessage
-                : input.RequestStateJson;
-
-            return ValueTask.FromResult(new CapitalCallWorkflowRequestState(
+            => ValueTask.FromResult(new CapitalCallWorkflowRequestState(
                 input.TenantId,
                 input.ConversationId,
                 input.OperationId,
-                requestStateJson));
-        }
+                input.RequestState));
     }
 
     // Builds the extracted partner/feeder tree that the reviewer can inspect and edit before any
@@ -134,16 +120,15 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
                 input.TenantId,
                 input.ConversationId,
                 input.OperationId,
-                input.RequestStateJson,
+                input.RequestState,
                 cancellationToken);
             var reviewArtifact = await reviewArtifactService.CreateAsync(
                 input.TenantId,
                 input.ConversationId,
                 input.OperationId,
-                JsonContent.Serialize(reviewPayload),
+                reviewPayload,
                 cancellationToken);
 
-            reviewPayload.ReviewFileAssetId = reviewArtifact.FileAssetId;
             reviewPayload.ReviewDownloadRoute = reviewArtifact.DownloadRoute;
             reviewPayload.ReviewFileName = reviewArtifact.FileName;
             return reviewPayload;
@@ -172,7 +157,7 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             var result = await engine.ComputeAsync(
                 input.TenantId,
                 input.ConversationId,
-                JsonContent.Serialize(input),
+                input,
                 cancellationToken);
 
             return new CapitalCallComputedWorkflowState(input, result);
@@ -193,15 +178,8 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             IWorkflowContext context,
             CancellationToken cancellationToken)
             => ValueTask.FromResult(new CapitalCallWorkflowCompleted(
-                input.ReviewPayload.RequestStateJson,
-                JsonContent.Serialize(input.ReviewPayload),
-                input.ComputationResult.NoticeDtoJson,
-                input.ComputationResult.Notice.RootFundName,
-                input.ComputationResult.Notice.RootCurrency,
-                input.ComputationResult.Notice.RootCapitalCallAmount,
-                input.ReviewPayload.ReviewFileAssetId,
-                input.ReviewPayload.ReviewDownloadRoute,
-                input.ReviewPayload.ReviewFileName));
+                input.ReviewPayload,
+                input.ComputationResult.Notice));
     }
 
     // Shared state after loading request data and before running the allocation engine.
@@ -209,7 +187,7 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         string TenantId,
         string ConversationId,
         string OperationId,
-        string RequestStateJson);
+        CapitalCallRequestState RequestState);
 
     private sealed record CapitalCallComputedWorkflowState(
         CapitalCallExtractionReviewPayload ReviewPayload,

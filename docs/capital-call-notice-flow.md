@@ -1,58 +1,29 @@
 # Capital Call Notice Flow
 
-This document explains how capital call notice creation currently works in the sample project.
+This document explains the current capital call flow in the sample project.
 
 It covers:
 
 - happy path
 - clarification loop
-- attachment-backed flow
-- validation and failure cases
-- current workflow boundaries
-- the main code paths involved
+- editable human review
+- template-output handoff
+- uploaded vs generated files
 
 ## 1. Purpose
 
-The `Capital Call Notice` capability lets a user ask for a capital call notice in chat and receive one of:
+The `Capital Call Notice` capability lets a user ask for a capital call in chat and drive it through four stages:
 
-- a draft notice route in SaaS mode
-- a downloadable CSV artifact in attachment mode
+1. capture request inputs in chat
+2. resolve partner and feeder data from a provider or uploaded CSV
+3. pause for human review of the extracted partner data
+4. compute approved allocations and hand them to a separate template-output operation
 
-The flow supports:
+The capital call workflow no longer creates the final template artifact itself. That is now a reusable downstream operation.
 
-- partial user input in chat
-- clarification in the same conversation thread
-- recursive feeder-fund allocation
-- FX conversion at feeder-fund boundaries
-- deterministic rounding and residual handling
+## 2. Inputs
 
-## 2. Important Current Design Note
-
-The current implementation is split into two phases:
-
-1. `Intake and clarification phase`
-- runs in the agent + dispatcher + request-preparation layer
-- uses LLM-assisted extraction plus deterministic validation
-- loops in the same chat thread until enough data is available
-
-2. `Execution phase`
-- runs in a Microsoft Agent Framework code-first workflow graph
-- performs deterministic allocation and result materialization
-
-That means:
-
-- clarification happens **before** the workflow starts
-- the workflow currently handles:
-  - compute allocations
-  - materialize result
-
-The current code-first workflow definition is in:
-
-- [CapitalCallNoticeWorkflowDefinition.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/CapitalCallNoticeWorkflowDefinition.cs)
-
-## 3. Inputs and Outputs
-
-### Mandatory inputs
+### Mandatory business inputs
 
 - `fundName`
 - `capitalCallAmount`
@@ -60,119 +31,99 @@ The current code-first workflow definition is in:
 ### Optional inputs
 
 - `noticeDate`
-- explicit `partnerOverrides`
+- partner-level commitment overrides
 
-### Data source modes
+### Required data source
 
-- `SaaS`
-  - fund and partner data comes from the SaaS-backed provider
-- `AttachmentFile`
-  - fund and partner data comes from an uploaded CSV
-- `Mcp`
-  - modeled in the abstraction, not implemented as a real integration yet
+In addition to `fundName` and `capitalCallAmount`, the workflow needs one source of partner data:
 
-### Output modes
+- a tenant-configured provider
+- or an uploaded source file
+
+Current source modes:
 
 - `SaaS`
-  - create draft notice and return route
 - `AttachmentFile`
-  - generate downloadable CSV output
+- `Mcp` is still just an abstraction point for future work
 
-## 4. High-Level Flow
+If no provider is configured, a file is required.
+
+## 3. Current Design Boundary
+
+The flow is intentionally split into three layers.
+
+### A. Intake and clarification
+
+This happens before the workflow starts.
+
+Responsibilities:
+
+- extract structured request data from chat
+- merge follow-up clarifications into request state
+- resolve provider vs attachment mode
+- validate that the request is complete enough to start
+
+### B. Capital call workflow
+
+This uses Microsoft Agent Framework workflows and now runs in this order:
+
+1. load normalized request state
+2. build extracted partner / feeder review payload
+3. pause for editable human review
+4. compute deterministic allocations from the reviewed payload
+5. complete with approved allocation data
+
+### C. Template output operation
+
+This is a separate reusable operation.
+
+Responsibilities:
+
+- take approved workflow data from another operation
+- render it into an output workbook/template
+- store the generated artifact
+
+## 4. Human-in-the-Loop Model
+
+The shared review system now supports different interaction modes.
+
+Current modes:
+
+- `ApproveReject`
+- `EditAndSubmit`
+
+Capital call uses `EditAndSubmit`.
+
+That means the user does not just approve or reject. They can:
+
+- inspect extracted partner data
+- change commitment percentages
+- adjust feeder nodes in the payload
+- submit the edited payload back into the workflow
+
+The submitted payload becomes the authoritative input for the allocation engine.
+
+## 5. High-Level Flow
 
 ```mermaid
 flowchart TD
     A["User asks for capital call notice"] --> B["NoticeCreationAgent"]
-    B --> C["LLM intent extraction"]
-    C --> D["Request preparation + provider resolution + validation"]
+    B --> C["LLM capture of fund name, amount, overrides"]
+    C --> D["Request preparation and validation"]
 
-    D -->|Missing or invalid data| E["Clarification prompt returned in same chat"]
-    E --> F["User replies with missing details"]
+    D -->|Missing data| E["Clarification prompt in same chat"]
+    E --> F["User replies"]
     F --> C
 
     D -->|Ready| G["Start capital call workflow"]
-    G --> H["Compute allocations deterministically"]
-    H --> I["Materialize result"]
-    I --> J["Persist operation result"]
-    J --> K["Return draft route or download action"]
+    G --> H["Build extracted partner review payload"]
+    H --> I["Create downloadable review workbook"]
+    I --> J["Editable HITL review task"]
+    J --> K["User submits reviewed payload"]
+    K --> L["Deterministic allocation engine"]
+    L --> M["Store approved allocation data on operation"]
+    M --> N["Separate template output operation can be started"]
 ```
-
-## 5. Main Components
-
-### Agent
-
-- [NoticeCreationAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/NoticeCreationAgent.cs)
-
-Responsibilities:
-
-- starts the capital call flow
-- continues it when clarification is required
-- returns the right user-facing action after completion
-
-### Workflow dispatcher
-
-- [FundAdministrationWorkflowDispatcher.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/FundAdministrationWorkflowDispatcher.cs)
-
-Responsibilities:
-
-- orchestrates the pre-workflow clarification loop
-- starts the workflow when the request is ready
-- applies workflow results back onto the operation
-
-### Conversation intelligence
-
-- [CapitalCallConversationIntelligence.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallConversationIntelligence.cs)
-
-Responsibilities:
-
-- extracts structured input from chat
-- uses conversation compaction before LLM extraction
-
-### Request preparation
-
-- [CapitalCallExecutionServices.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs)
-
-Specifically:
-
-- `CapitalCallRequestPreparationService`
-
-Responsibilities:
-
-- merges user patch into request state
-- resolves execution profile
-- loads root fund
-- validates feeder tree and percentages
-- returns either:
-  - `IsReady = false` with a clarification prompt
-  - `IsReady = true` with normalized request state
-
-### Allocation engine
-
-Specifically:
-
-- `CapitalCallAllocationEngine`
-
-Responsibilities:
-
-- recursively expands feeder structure
-- converts amounts at feeder-fund boundaries
-- computes partner allocations
-- rounds to 2 decimals
-- settles residual to the last sorted partner
-- builds the `CapitalCallNoticeDto`
-
-### Result materializer
-
-Specifically:
-
-- `CapitalCallResultMaterializer`
-
-Responsibilities:
-
-- persists final operation state
-- produces:
-  - draft route for SaaS
-  - downloadable CSV artifact for attachment mode
 
 ## 6. Happy Path
 
@@ -184,57 +135,23 @@ User says:
 
 ### Step-by-step
 
-1. Chat message is routed to `NoticeCreationAgent`.
-2. The agent asks the dispatcher to start capital-call intake.
-3. `CapitalCallConversationIntelligence` extracts:
-   - `fundName = Apex Fund I`
-   - `capitalCallAmount = 1000`
-4. `CapitalCallRequestPreparationService`:
-   - merges extracted data into request state
-   - resolves the execution profile
-   - resolves the root fund
-   - validates percentages and feeder tree
-5. If valid, the dispatcher starts the capital-call workflow.
-6. The code-first workflow graph invokes:
-   - `computeCapitalCallAllocations`
-   - `materializeCapitalCallResult`
-7. The workflow result is applied back to the operation.
-8. The agent returns:
-   - `OpenPageWithPrefill` for SaaS draft mode
-   - or download action for attachment mode
+1. Chat routes the message to [NoticeCreationAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/NoticeCreationAgent.cs).
+2. [CapitalCallConversationIntelligence.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallConversationIntelligence.cs) extracts `fundName` and `capitalCallAmount`.
+3. [CapitalCallRequestPreparationService](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs) resolves the source mode and validates the root fund tree.
+4. The dispatcher starts [CapitalCallNoticeWorkflowDefinition.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/CapitalCallNoticeWorkflowDefinition.cs).
+5. The workflow builds a `CapitalCallExtractionReviewPayload`.
+6. A review workbook is generated from the extracted partner/feeder data.
+7. The workflow pauses on an editable review task.
+8. The user reviews the extracted JSON or workbook and submits corrections.
+9. The workflow resumes and the deterministic allocation engine computes approved allocations.
+10. The completed operation stores:
+   - original request state
+   - reviewed extraction payload
+   - approved allocation DTO
+   - review workbook metadata
+11. The agent returns an action to start the reusable `Template Output` operation.
 
-### Happy-path sequence
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as Chat API
-    participant A as NoticeCreationAgent
-    participant D as Workflow Dispatcher
-    participant I as Conversation Intelligence
-    participant P as Request Preparation
-    participant W as Workflow Runtime
-    participant E as Allocation Engine
-    participant M as Result Materializer
-
-    U->>C: Create a capital call notice for Apex Fund I for INR 1000
-    C->>A: StartAsync(...)
-    A->>D: StartCapitalCallNoticeAsync(...)
-    D->>I: CaptureIntentAsync(...)
-    I-->>D: fundName + amount
-    D->>P: PrepareAsync(...)
-    P-->>D: IsReady = true
-    D->>W: StartAsync(capital-call-notice)
-    W->>E: computeCapitalCallAllocations
-    E-->>W: CapitalCallNoticeDto
-    W->>M: materializeCapitalCallResult
-    M-->>W: draft route or artifact
-    W-->>D: WorkflowRunResult
-    D-->>A: updated operation
-    A-->>C: agent result with user-facing action
-```
-
-## 7. Clarification Path
+## 7. Clarification Loop
 
 ### Example
 
@@ -244,237 +161,118 @@ User says:
 
 The amount is missing.
 
-### Step-by-step
+### Behavior
 
-1. The agent starts the same intake flow.
-2. LLM extraction captures only `fundName`.
-3. Request preparation sees that `capitalCallAmount` is still missing.
-4. The dispatcher marks the operation as:
-   - `ClarificationRequired`
-   - `CurrentStep = CaptureInputs`
-5. The agent returns the clarification prompt in chat.
-6. User replies:
-   - `Raise INR 1000`
-7. `ContinueAsync` is invoked on the same operation.
-8. The new reply is interpreted as a patch.
-9. The request state is merged and validated again.
-10. Once ready, the workflow starts and continues through the happy path.
+1. Intake captures only `fundName`.
+2. Request preparation sees `capitalCallAmount` is missing.
+3. The operation becomes `ClarificationRequired`.
+4. The user is asked for the missing data in the same thread.
+5. On reply, the same operation continues and merges the new patch into request state.
+6. This repeats until:
+   - the fund name is resolved
+   - the amount is present
+   - a provider or source file is available
 
-### Clarification sequence
+Clarification happens before workflow execution.
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as NoticeCreationAgent
-    participant D as Workflow Dispatcher
-    participant I as Conversation Intelligence
-    participant P as Request Preparation
+## 8. Editable Review Step
 
-    U->>A: Create a capital call notice for Apex Fund I
-    A->>D: StartCapitalCallNoticeAsync(...)
-    D->>I: CaptureIntentAsync(...)
-    I-->>D: fundName only
-    D->>P: PrepareAsync(...)
-    P-->>D: IsReady = false, clarification prompt
-    D-->>A: operation marked ClarificationRequired
-    A-->>U: "I still need the capital call amount..."
+The capital call review task is created from the workflow pending request and is configured as:
 
-    U->>A: Raise INR 1000
-    A->>D: ContinueCapitalCallNoticeAsync(...)
-    D->>I: InterpretClarificationAsync(...)
-    I-->>D: amount patch
-    D->>P: PrepareAsync(...)
-    P-->>D: IsReady = true
-    D->>D: Start workflow
-```
+- `TaskType = CapitalCallExtractionReview`
+- `InteractionMode = EditAndSubmit`
 
-## 8. Execution Profile Resolution
+The review payload contains:
 
-The current profile resolution rule is:
+- request state JSON
+- root fund
+- feeder tree
+- partner names
+- partner currencies
+- commitment percentages
+- review workbook metadata
 
-- if the tenant has a configured provider, use that provider profile
-- otherwise, require an uploaded source file
-- if no provider is configured and no file is present, return a clarification prompt
+The user can submit edited JSON. The review service validates that the submitted payload is valid JSON before resuming the workflow.
 
-Important current behavior:
+The review UI now supports both response styles:
 
-- the sample `tenant-demo` has a configured SaaS-style provider
-- attachment mode currently expects a CSV for the actual sample implementation
-- if a spreadsheet attachment exists but is not a CSV, the flow returns a clarification prompt
+- natural-language change request
+- advanced raw-payload edit
 
-This logic lives in:
+Natural-language changes are applied through the shared review-payload revision service before the workflow resumes, so this pattern can be reused by future agents too.
 
-- `ResolveExecutionProfile(...)` in [CapitalCallExecutionServices.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs)
+## 9. Deterministic Allocation Rules
 
-## 9. Validation Rules
+Once reviewed data is submitted, the allocation engine:
 
-The request preparation step validates the business graph before workflow execution starts.
+- recurses through feeder funds
+- enforces a max depth of 10
+- detects feeder cycles
+- converts currency only at feeder-fund boundaries
+- computes `partner amount = partner commitment % * fund amount`
+- rounds to 2 decimals
+- settles residual cents to the last partner after deterministic sorting
 
-Current validations include:
+The allocation engine uses the reviewed extraction payload, not the original provider snapshot.
 
-- missing `fundName`
-- missing or non-positive `capitalCallAmount`
-- unsupported attachment type in attachment mode
-- root fund not found
-- feeder depth greater than `10`
-- feeder cycle detected
-- fund has no partner commitment data
-- partner commitment percentages do not sum to `100`
-- feeder partner without child fund
-- child feeder fund cannot be loaded
+## 10. Separate Template Output Operation
 
-These checks happen in:
+Capital call no longer materializes the final workbook inside the workflow.
 
-- `PrepareAsync(...)`
-- `ValidateFundTreeAsync(...)`
+Instead:
 
-## 10. Allocation Logic
+- the capital call operation finishes with approved allocation data
+- the user can trigger [TemplateOutputAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/TemplateOutputAgent.cs)
+- that agent reads the approved capital call data and generates the final workbook
 
-The allocation engine is deterministic.
+This makes template rendering reusable across future workflows.
 
-### Rules currently implemented
+## 11. Uploaded vs Generated Files
 
-- partner allocation = `commitmentPercentage * amountToRaise / 100`
-- partners are sorted alphabetically by `PartnerName`
-- rounded to `2` decimal places
-- residual balance is settled to the last partner after sorting
-- feeder-fund allocations recurse into the child fund
-- FX conversion happens when moving from parent fund currency to child fund currency
+Conversation files now carry an explicit kind:
 
-### Important current limitation
+- `UploadedInput`
+- `GeneratedArtifact`
 
-Leaf investor currency is not used for a final conversion step. The current implementation converts only at feeder-fund boundaries.
+Examples:
 
-## 11. Output Shapes
+- uploaded CSV source file = `UploadedInput`
+- generated extraction review workbook = `GeneratedArtifact`
+- generated template output workbook = `GeneratedArtifact`
 
-The computation stage produces:
+The UI shows these separately so users can clearly distinguish:
 
-- `CapitalCallNoticeDto`
+- files they provided
+- files the system produced
 
-It contains:
+## 12. Main Code Paths
 
-- root fund information
-- `FundBreakdowns`
-- `LeafAllocations`
+### Agent and dispatcher
 
-The materialization stage then produces one of:
-
-- draft route
-- file artifact + download route
-
-## 12. Operation State Transitions
-
-Typical operation states for capital call:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Received
-    Received --> Running
-    Running --> ClarificationRequired
-    ClarificationRequired --> Running
-    Running --> Completed
-    Running --> Failed
-```
-
-More specifically:
-
-- initial agent start sets the operation to `Running`
-- missing data moves it to `ClarificationRequired`
-- clarification reply moves it back into intake processing
-- ready request starts workflow execution
-- successful materialization ends in `Completed`
-- exceptions or workflow errors end in `Failed`
-
-## 13. Data Sources
-
-### SaaS sample provider
-
-- [CapitalCallDataProviders.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallDataProviders.cs)
-
-Current sample data includes:
-
-- `Apex Fund I`
-- `North Star Feeder`
-- `Horizon Feeder II`
-- `Summit Growth Fund II`
-
-### Attachment provider
-
-The attachment-backed provider reads a CSV and builds in-memory fund snapshots for the flow.
-
-Current expected columns include:
-
-- `FundName`
-- `FundCurrency`
-- `PartnerName`
-- `CommitmentPercentage`
-- `PartnerCurrency`
-- `PartnerType`
-- `ChildFundName`
-
-## 14. Agentic vs Deterministic Split
-
-### Agentic parts
-
-- `CaptureIntentAsync(...)`
-- `InterpretClarificationAsync(...)`
-- conversation history compaction before extraction
-
-### Deterministic parts
-
-- execution profile resolution
-- request-state merge
-- root fund resolution
-- feeder validation
-- recursion
-- FX conversion
-- rounding and residual settlement
-- DTO generation
-- final materialization
-
-This is intentional so the financial math stays deterministic and auditable.
-
-## 15. Current Logging Coverage
-
-The flow now logs:
-
-- chat intake and routing decision
-- capital-call intake start and continue
-- clarification required prompts
-- request preparation summary
-- validation failures
-- workflow start and completion
-- feeder expansion
-- FX conversion
-- final result materialization
-
-Relevant logging points:
-
-- [ChatOrchestratorService.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Application/Conversations/ChatOrchestratorService.cs)
+- [NoticeCreationAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/NoticeCreationAgent.cs)
 - [FundAdministrationWorkflowDispatcher.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/FundAdministrationWorkflowDispatcher.cs)
+
+### Intake and preparation
+
 - [CapitalCallConversationIntelligence.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallConversationIntelligence.cs)
 - [CapitalCallExecutionServices.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs)
+
+### Workflow
+
+- [CapitalCallNoticeWorkflowDefinition.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/CapitalCallNoticeWorkflowDefinition.cs)
 - [WorkflowRuntime.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Infrastructure/Workflows/WorkflowRuntime.cs)
 
-## 16. Relevant Code Map
+### Review model
 
-If you want to trace the flow in code, the best reading order is:
+- [ReviewModels.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Domain/Reviews/ReviewModels.cs)
+- [ReviewTaskService.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Application/Reviews/ReviewTaskService.cs)
 
-1. [NoticeCreationAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/NoticeCreationAgent.cs)
-2. [FundAdministrationWorkflowDispatcher.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/FundAdministrationWorkflowDispatcher.cs)
-3. [CapitalCallConversationIntelligence.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallConversationIntelligence.cs)
-4. [CapitalCallExecutionServices.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs)
-5. [CapitalCallNoticeWorkflowDefinition.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/CapitalCallNoticeWorkflowDefinition.cs)
-6. [CapitalCallWorkflowTools.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallWorkflowTools.cs)
-7. [WorkflowRuntime.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Infrastructure/Workflows/WorkflowRuntime.cs)
+### Template output
 
-## 17. Future Improvements
+- [TemplateOutputAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/TemplateOutputAgent.cs)
 
-Likely next improvements for this flow are:
+### Frontend
 
-- move clarification fully inside the workflow graph if desired
-- add real MCP data provider and result sink
-- support tenant-configured flexible spreadsheet mapping
-- support richer override handling
-- add per-allocation explanation metadata for audit and UI display
-- add tests for feeder recursion, FX conversion, and residual settlement
+- [App.tsx](/Users/naveenkumarpatil/Documents/orchestrator%20design/frontend/app/src/App.tsx)
+- [api.ts](/Users/naveenkumarpatil/Documents/orchestrator%20design/frontend/app/src/api.ts)
+- [types.ts](/Users/naveenkumarpatil/Documents/orchestrator%20design/frontend/app/src/types.ts)

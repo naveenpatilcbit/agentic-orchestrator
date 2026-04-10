@@ -3,7 +3,8 @@ namespace ConversationalOrchestration.Application.Abstractions;
 public enum LlmProfile
 {
     Routing = 1,
-    InputCompletion = 2
+    InputCompletion = 2,
+    ReviewRevision = 3
 }
 
 public sealed record StructuredLlmRequest(

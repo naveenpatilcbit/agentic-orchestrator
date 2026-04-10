@@ -48,9 +48,10 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         _logger = logger;
     }
 
-    public async Task<WorkflowRunResult> StartAsync(
-        WorkflowStartRequest request,
+    public async Task<WorkflowRunResult> StartAsync<TInput>(
+        WorkflowStartRequest<TInput> request,
         CancellationToken cancellationToken)
+        where TInput : notnull
     {
         _logger.LogInformation(
             "Starting workflow {WorkflowName} for tenant {TenantId} conversation {ConversationId} operation {OperationId}. RequestedInstanceId={RequestedWorkflowInstanceId}",
@@ -60,6 +61,7 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             request.OperationId,
             request.WorkflowInstanceId);
         var definition = _workflowRegistry.Resolve(request.WorkflowName);
+        ValidateStartInputType(definition, typeof(TInput));
         var instance = new WorkflowInstance
         {
             Id = request.WorkflowInstanceId ?? Guid.NewGuid().ToString("N"),
@@ -155,14 +157,14 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         return await PersistRunAsync(instance, run, processingResult, cancellationToken);
     }
 
-    private async Task<Run> RunWorkflowAsync(
+    private async Task<Run> RunWorkflowAsync<TInput>(
         IWorkflowDefinition definition,
-        object input,
+        TInput input,
         WorkflowBuildContext buildContext,
         CancellationToken cancellationToken)
+        where TInput : notnull
     {
-        dynamic payload = input;
-        return await InProcessExecution.RunAsync(definition.Build(buildContext), payload, _checkpointManager, buildContext.WorkflowInstanceId, cancellationToken);
+        return await InProcessExecution.RunAsync(definition.Build(buildContext), input!, _checkpointManager, buildContext.WorkflowInstanceId, cancellationToken);
     }
 
     private async Task<RunProcessingResult> ProcessRunAsync(
@@ -192,6 +194,8 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                 {
                     case RequestInfoEvent requestInfoEvent:
                     {
+                        // Request ports can either pause for an external reply or be auto-satisfied by
+                        // the workflow definition. Both paths still need to preserve the same request id.
                         var automaticResponse = await definition.TryCreateAutomaticResponseAsync(
                             requestInfoEvent,
                             cancellationToken);
@@ -228,6 +232,9 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                             {
                                 outputs.Add(new WorkflowOutputMessage(
                                     "MessageActivity",
+                                    new WorkflowActivityPayload(
+                                        agentResponse.Text,
+                                        ChatRole.Assistant.Value),
                                     SerializeValue(
                                         new WorkflowActivityPayload(
                                             agentResponse.Text,
@@ -239,6 +246,7 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
                             outputs.Add(new WorkflowOutputMessage(
                                 data.GetType().Name,
+                                data,
                                 SerializeValue(data, data.GetType()),
                                 outputEvent.ExecutorId));
                         }
@@ -366,6 +374,8 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         pendingRequest.PortId = requestInfoEvent.Request.PortInfo.PortId;
         pendingRequest.RequestId = requestInfoEvent.Request.RequestId;
         pendingRequest.RequestType = requestInfoEvent.Request.PortInfo.RequestType.ToString();
+        // Persist the typed request payload as JSON so review tasks and later resume calls can
+        // reconstruct the exact workflow request outside the in-memory run.
         pendingRequest.RequestPayloadJson = requestData is null
             ? "{}"
             : SerializeValue(requestData, requestData.GetType());
@@ -389,6 +399,8 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
     {
         var portDescriptor = definition.ResolveRequestPort(pendingRequest.PortId);
         var requestPayload = DeserializeValue(pendingRequest.RequestPayloadJson, portDescriptor.RequestType);
+        // Resume has to recreate the original request envelope before attaching the response;
+        // this is how the workflow runtime binds the human reply back to the correct request port.
         if (portDescriptor.ResponseType == typeof(ExternalInputResponse))
         {
             var resumePayload = JsonSerializer.Deserialize<ExternalInputResumePayload>(
@@ -461,6 +473,15 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
     private string SerializeValue(object value, Type targetType) =>
         JsonSerializer.Serialize(value, targetType, _serializerOptions);
+
+    private static void ValidateStartInputType(IWorkflowDefinition definition, Type inputType)
+    {
+        if (!definition.StartInputType.IsAssignableFrom(inputType))
+        {
+            throw new InvalidOperationException(
+                $"Workflow '{definition.Name}' expects a start payload of type '{definition.StartInputType.Name}', but received '{inputType.Name}'.");
+        }
+    }
 
     private sealed record RunProcessingResult(
         IReadOnlyCollection<WorkflowPendingRequest> PendingRequests,

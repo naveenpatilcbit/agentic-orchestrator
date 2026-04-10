@@ -96,6 +96,14 @@ function prettyJson(rawJson: string) {
   }
 }
 
+function normalizeJson(rawJson: string) {
+  try {
+    return JSON.stringify(JSON.parse(rawJson));
+  } catch {
+    return null;
+  }
+}
+
 function countFundNodes(fund?: CapitalCallReviewFund | null): number {
   if (!fund) {
     return 0;
@@ -159,6 +167,11 @@ function parseActionPayload(rawJson?: string | null): { startMessage?: string } 
   } catch {
     return null;
   }
+}
+
+function openFileDownload(fileId: string) {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+  window.open(new URL(`/api/files/${fileId}/download`, baseUrl).toString(), "_blank", "noopener,noreferrer");
 }
 
 export default function App() {
@@ -241,6 +254,18 @@ export default function App() {
     [snapshot],
   );
 
+  const uploadedInputFiles = useMemo(
+    () =>
+      snapshot?.files.filter((file) => file.kind === "UploadedInput") ?? [],
+    [snapshot],
+  );
+
+  const generatedArtifacts = useMemo(
+    () =>
+      snapshot?.files.filter((file) => file.kind === "GeneratedArtifact") ?? [],
+    [snapshot],
+  );
+
   async function handleSend(inputMessage = message) {
     if (!inputMessage.trim()) return;
 
@@ -297,8 +322,11 @@ export default function App() {
   async function handleDecision(
     task: ReviewTask,
     action: string,
-    finalPayloadJson?: string,
-    notes?: string,
+    options?: {
+      finalPayloadJson?: string;
+      changeRequestText?: string;
+      notes?: string;
+    },
   ) {
     setIsBusy(true);
     setError(null);
@@ -306,8 +334,7 @@ export default function App() {
       const updated = await submitReviewDecision(
         task.id,
         action,
-        finalPayloadJson,
-        notes,
+        options,
       );
       setSnapshot(updated);
     } catch (decisionError) {
@@ -509,7 +536,9 @@ export default function App() {
                   key={task.id}
                   task={task}
                   operations={snapshot?.operations ?? []}
-                  onSubmit={(action, finalPayloadJson, notes) => handleDecision(task, action, finalPayloadJson, notes)}
+                  onSubmit={(action, options) => {
+                    void handleDecision(task, action, options);
+                  }}
                 />
               ))}
               {openReviewTasks.length === 0 ? (
@@ -543,22 +572,40 @@ export default function App() {
               onClick={() => setIsFilesOpen((current) => !current)}
             >
               <span>
-                <strong>Uploaded Files</strong>
+                <strong>Conversation Files</strong>
                 <small>{(snapshot?.files.length ?? 0) + uploadQueue.length} attached</small>
               </span>
               <span className={`accordion-chevron ${isFilesOpen ? "open" : ""}`}>⌄</span>
             </button>
             {isFilesOpen ? (
               <div className="file-stack">
-                {uploadQueue.map((file) => (
-                  <FilePill key={file.id} file={file} pending />
-                ))}
-                {snapshot?.files.map((file) => (
-                  <FilePill key={file.id} file={file} />
-                ))}
-                {snapshot?.files.length === 0 && uploadQueue.length === 0 ? (
-                  <p className="muted">Upload agreements, subscription docs, or templates before you ask.</p>
-                ) : null}
+                <div className="file-group">
+                  <div className="file-group-heading">
+                    <strong>Uploaded Inputs</strong>
+                    <span>{uploadQueue.length + uploadedInputFiles.length}</span>
+                  </div>
+                  {uploadQueue.map((file) => (
+                    <FilePill key={file.id} file={file} pending />
+                  ))}
+                  {uploadedInputFiles.map((file) => (
+                    <FilePill key={file.id} file={file} />
+                  ))}
+                  {uploadQueue.length === 0 && uploadedInputFiles.length === 0 ? (
+                    <p className="muted">Upload agreements, subscription docs, or source CSV files before you ask.</p>
+                  ) : null}
+                </div>
+                <div className="file-group">
+                  <div className="file-group-heading">
+                    <strong>Generated Outputs</strong>
+                    <span>{generatedArtifacts.length}</span>
+                  </div>
+                  {generatedArtifacts.map((file) => (
+                    <FilePill key={file.id} file={file} generated />
+                  ))}
+                  {generatedArtifacts.length === 0 ? (
+                    <p className="muted">Review workbooks, template outputs, and other generated artifacts will appear here.</p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </section>
@@ -577,15 +624,31 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function FilePill({ file, pending = false }: { file: FileAsset; pending?: boolean }) {
+function FilePill({
+  file,
+  pending = false,
+  generated = false,
+}: {
+  file: FileAsset;
+  pending?: boolean;
+  generated?: boolean;
+}) {
+  const canDownload = !pending;
+
   return (
-    <div className={`file-pill ${pending ? "pending" : ""}`}>
+    <button
+      type="button"
+      className={`file-pill ${pending ? "pending" : ""} ${generated ? "generated" : ""} ${canDownload ? "downloadable" : ""}`}
+      onClick={canDownload ? () => openFileDownload(file.id) : undefined}
+      disabled={!canDownload}
+      title={canDownload ? `Download ${file.fileName}` : "File will be downloadable after upload completes"}
+    >
       <div>
         <strong>{file.fileName}</strong>
         <span>{formatBytes(file.sizeBytes)}</span>
       </div>
-      <em>{pending ? "queued for send" : "uploaded"}</em>
-    </div>
+      <em>{pending ? "queued for send" : generated ? "generated" : "uploaded"}</em>
+    </button>
   );
 }
 
@@ -613,14 +676,25 @@ function ReviewCard({
 }: {
   task: ReviewTask;
   operations: AgentOperation[];
-  onSubmit: (action: string, finalPayloadJson?: string, notes?: string) => void;
+  onSubmit: (
+    action: string,
+    options?: {
+      finalPayloadJson?: string;
+      changeRequestText?: string;
+      notes?: string;
+    },
+  ) => void;
 }) {
   const operation = operations.find((candidate) => candidate.id === task.operationId);
   const [draftPayload, setDraftPayload] = useState(prettyJson(task.finalPayloadJson ?? task.proposedPayloadJson));
+  const [changeRequestText, setChangeRequestText] = useState("");
+  const [isRawEditorOpen, setIsRawEditorOpen] = useState(false);
   const [payloadError, setPayloadError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraftPayload(prettyJson(task.finalPayloadJson ?? task.proposedPayloadJson));
+    setChangeRequestText("");
+    setIsRawEditorOpen(false);
     setPayloadError(null);
   }, [task.id, task.finalPayloadJson, task.proposedPayloadJson]);
 
@@ -631,20 +705,59 @@ function ReviewCard({
   const capitalCallFund = capitalCallReviewPayload?.rootFund ?? null;
   const previewRows = buildCapitalCallPreviewRows(capitalCallFund).slice(0, 6);
   const primaryLabel = isEditable ? "Submit Reviewed Data" : "Approve";
+  const originalNormalizedPayload = normalizeJson(task.finalPayloadJson ?? task.proposedPayloadJson);
+  const draftNormalizedPayload = normalizeJson(draftPayload);
+  const hasStructuredChanges = originalNormalizedPayload !== null &&
+    draftNormalizedPayload !== null &&
+    originalNormalizedPayload !== draftNormalizedPayload;
 
   function handlePrimaryAction() {
     if (!isEditable) {
-      onSubmit("Approved", task.proposedPayloadJson);
+      onSubmit("Approved", { finalPayloadJson: task.proposedPayloadJson });
       return;
     }
 
-    try {
-      const normalized = JSON.stringify(JSON.parse(draftPayload), null, 2);
-      setPayloadError(null);
-      onSubmit("Submitted", normalized, "Reviewed and edited from the review queue.");
-    } catch {
-      setPayloadError("The edited payload is not valid JSON yet. Fix it before submitting.");
+    if (hasStructuredChanges) {
+      try {
+        const normalized = JSON.stringify(JSON.parse(draftPayload), null, 2);
+        setPayloadError(null);
+        onSubmit("Submitted", {
+          finalPayloadJson: normalized,
+          notes: "Reviewed with structured payload edits from the review queue.",
+        });
+        return;
+      } catch {
+        setPayloadError("The edited payload is not valid JSON yet. Fix it before submitting.");
+        return;
+      }
     }
+
+    if (changeRequestText.trim()) {
+      setPayloadError(null);
+      onSubmit("Submitted", {
+        changeRequestText: changeRequestText.trim(),
+        notes: "Reviewed with natural-language change request from the review queue.",
+      });
+      return;
+    }
+
+    setPayloadError("Add a change request in natural language, edit the payload directly, or use Approve as-is.");
+  }
+
+  function handleApproveAsIs() {
+    setPayloadError(null);
+    onSubmit("Approved", {
+      finalPayloadJson: task.proposedPayloadJson,
+      notes: "Approved as-is from the review queue.",
+    });
+  }
+
+  function handleReject() {
+    onSubmit("Rejected", {
+      finalPayloadJson: hasStructuredChanges ? draftPayload : task.proposedPayloadJson,
+      changeRequestText: changeRequestText.trim() || undefined,
+      notes: "Rejected from the review queue.",
+    });
   }
 
   return (
@@ -686,15 +799,42 @@ function ReviewCard({
           {capitalCallReviewPayload.reviewFileName ? `: ${capitalCallReviewPayload.reviewFileName}` : ""}
         </button>
       ) : null}
+      {isEditable ? (
+        <div className="review-change-box">
+          <label className="review-label" htmlFor={`review-change-${task.id}`}>
+            Tell me what to change
+          </label>
+          <textarea
+            id={`review-change-${task.id}`}
+            className="review-change-textarea"
+            value={changeRequestText}
+            onChange={(event) => setChangeRequestText(event.target.value)}
+            placeholder="Example: Change North Star Feeder to 55% and keep Apex USD Feeder under the master fund."
+            rows={4}
+          />
+          <button
+            className="ghost-button review-advanced-toggle"
+            type="button"
+            onClick={() => setIsRawEditorOpen((current) => !current)}
+          >
+            {isRawEditorOpen ? "Hide advanced payload editor" : "Advanced: edit raw payload"}
+          </button>
+        </div>
+      ) : null}
       <div className="review-actions">
-        <button className="secondary-button" type="button" onClick={onReject}>
+        <button className="secondary-button" type="button" onClick={handleReject}>
           Reject
         </button>
+        {isEditable ? (
+          <button className="secondary-button" type="button" onClick={handleApproveAsIs}>
+            Approve as-is
+          </button>
+        ) : null}
         <button className="primary-button review-approve-button" type="button" onClick={handlePrimaryAction}>
           {primaryLabel}
         </button>
       </div>
-      {isEditable ? (
+      {isEditable && isRawEditorOpen ? (
         <>
           <textarea
             className="review-payload-editor"
@@ -705,15 +845,11 @@ function ReviewCard({
           />
           {payloadError ? <p className="review-error">{payloadError}</p> : null}
         </>
-      ) : (
+      ) : !isEditable ? (
         <pre>{task.proposedPayloadJson}</pre>
-      )}
+      ) : payloadError ? <p className="review-error">{payloadError}</p> : null}
     </article>
   );
-
-  function onReject() {
-    onSubmit("Rejected", isEditable ? draftPayload : task.proposedPayloadJson, "Rejected from the review queue.");
-  }
 }
 
 function MessageCard({

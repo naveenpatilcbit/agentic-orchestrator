@@ -5,7 +5,7 @@ Reusable conversational workflow framework plus a fund-administration domain mod
 This repo currently demonstrates:
 
 - `.NET 9` clean-architecture backend
-- `React + Vite` frontend with chat, previous threads, review queue, active work, and file uploads
+- `React + Vite` frontend with chat, previous threads, review queue, active work, uploaded inputs, and generated artifacts
 - `MongoDB` for conversations, operations, review tasks, audit events, files, workflow instances, pending requests, and checkpoints
 - `Microsoft Agent Framework Workflows` as the workflow engine
 - Mongo-backed checkpoint persistence with resume and retry support
@@ -18,6 +18,8 @@ This repo currently demonstrates:
 Design document:
 
 - [docs/system-design.md](/Users/naveenkumarpatil/Documents/orchestrator%20design/docs/system-design.md)
+- [docs/chat-history-and-compaction.md](/Users/naveenkumarpatil/Documents/orchestrator%20design/docs/chat-history-and-compaction.md)
+- [docs/capital-call-notice-flow.md](/Users/naveenkumarpatil/Documents/orchestrator%20design/docs/capital-call-notice-flow.md)
 
 ## Architecture
 
@@ -53,7 +55,7 @@ The framework separates:
 
 - `Conversation`: the chat thread the user sees
 - `Operation`: a single unit of work in that thread
-- `ReviewTask`: a human approval/input task tied to an operation
+- `ReviewTask`: a human approval or edit-and-submit task tied to an operation
 - `WorkflowInstance`: the long-running execution state
 - `WorkflowCheckpoint`: resumable workflow snapshot
 
@@ -121,21 +123,26 @@ Behavior:
 
 - user can start with partial input like `Create a capital call notice for Apex Fund I`
 - the system keeps asking in the same thread until mandatory inputs are complete
-- once ready, the workflow computes fund and feeder allocations
+- once ready, the workflow first builds extracted partner and feeder data for review
+- the reviewer can edit the extracted payload and submit it back into the workflow
+- the reviewer can either describe changes in natural language or use the advanced raw payload editor
+- only after review submission does the workflow compute fund and feeder allocations
 - FX conversion happens at feeder-fund boundaries
 - partner allocations are rounded to 2 decimals
 - residual cents are settled to the last partner after deterministic sorting
-- output is materialized as:
-  - a draft notice route for SaaS mode
-  - a downloadable CSV artifact for attachment mode
+- the approved allocation data is then handed off to a separate reusable `Template Output` operation
+- generated review workbooks and template outputs are stored separately from uploaded source files in the conversation snapshot
 
 Relevant implementation:
 
 - [NoticeCreationAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/NoticeCreationAgent.cs)
+- [TemplateOutputAgent.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Agents/TemplateOutputAgent.cs)
 - [CapitalCallConversationIntelligence.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallConversationIntelligence.cs)
 - [CapitalCallExecutionServices.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallExecutionServices.cs)
-- [CapitalCallWorkflowTools.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/CapitalCalls/CapitalCallWorkflowTools.cs)
 - [FundAdministrationWorkflowDispatcher.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Domain/ConversationalOrchestration.FundAdministration/Workflows/FundAdministrationWorkflowDispatcher.cs)
+- [ReviewTaskService.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Application/Reviews/ReviewTaskService.cs)
+- [LlmReviewPayloadRevisionService.cs](/Users/naveenkumarpatil/Documents/orchestrator%20design/backend/src/Framework/ConversationalOrchestration.Infrastructure/AI/LlmReviewPayloadRevisionService.cs)
+- [docs/capital-call-notice-flow.md](/Users/naveenkumarpatil/Documents/orchestrator%20design/docs/capital-call-notice-flow.md)
 
 ## Fund Onboarding Flow
 

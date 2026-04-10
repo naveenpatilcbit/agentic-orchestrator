@@ -123,7 +123,7 @@ public sealed class NoticeCreationAgent : IAgent
                 }],
                 BuildAudit(operation, "CapitalCallClarificationRequested", new { operation.PendingClarification })),
 
-            AgentOperationStatus.Completed when data is not null && !string.IsNullOrWhiteSpace(data.NoticeDtoJson) => new AgentExecutionResult(
+            AgentOperationStatus.Completed when data?.Notice is not null => new AgentExecutionResult(
                 $"I applied the reviewed partner data for {data.FundName} and calculated the final allocations. The approved data is now ready for a separate template output operation.",
                 operation,
                 BuildCompletedActions(operation, data),

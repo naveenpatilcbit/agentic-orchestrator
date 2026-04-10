@@ -77,6 +77,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         await _conversationMessageRepository.AddAsync(userMessage, cancellationToken);
         await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, conversation.Id, cancellationToken);
 
+        // A single conversation can carry multiple operations at once, so routing always looks at
+        // active operations and review tasks before deciding whether this message is new work.
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var routingDecision = await _routingService.DecideAsync(request.Message, conversation, operations, reviewTasks, attachments, cancellationToken);
@@ -343,6 +345,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
 
+        // Assistant messages are appended after the operation is saved so polling clients always
+        // see a conversation message that matches the latest persisted operation state.
         await AddAssistantMessageAsync(
             conversation.Id,
             context,
@@ -516,6 +520,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             asset.ConversationId,
             asset.FileName,
             asset.ContentType,
+            asset.Kind.ToString(),
             asset.SizeBytes,
             asset.UploadedAtUtc);
 }

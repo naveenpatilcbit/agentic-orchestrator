@@ -47,6 +47,7 @@ export type FileAsset = {
   conversationId: string;
   fileName: string;
   contentType: string;
+  kind: string;
   sizeBytes: number;
   uploadedAtUtc: string;
 };

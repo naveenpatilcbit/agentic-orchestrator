@@ -44,6 +44,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddScoped<IMessageIntentClassifier, LlmMessageIntentClassifier>();
         services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();
+        services.AddScoped<IReviewPayloadRevisionService, LlmReviewPayloadRevisionService>();
         services.AddScoped<IConversationHistoryCompactionService, ConversationHistoryCompactionService>();
         services.AddSingleton<MongoCollections>();
         services.AddScoped<IConversationRepository, ConversationRepository>();

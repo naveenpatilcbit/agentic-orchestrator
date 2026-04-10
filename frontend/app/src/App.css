@@ -204,6 +204,20 @@ body {
   overflow: visible;
 }
 
+.file-group {
+  display: grid;
+  gap: 10px;
+}
+
+.file-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+  color: var(--qapita-muted);
+}
+
 .thread-list {
   min-height: 0;
   overflow-y: auto;
@@ -671,9 +685,45 @@ body {
   text-align: center;
 }
 
+.review-change-box {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.review-label {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--qapita-primary);
+}
+
+.review-change-textarea {
+  width: 100%;
+  min-height: 96px;
+  margin: 0;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--qapita-border);
+  background: #fffdf8;
+  color: var(--qapita-text);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.review-change-textarea:focus {
+  outline: none;
+  border-color: rgba(105, 65, 148, 0.42);
+  box-shadow: 0 0 0 3px rgba(105, 65, 148, 0.12);
+}
+
+.review-advanced-toggle {
+  justify-self: start;
+  padding: 10px 14px;
+}
+
 .review-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 10px;
   margin-top: 14px;
   margin-bottom: 14px;
@@ -694,6 +744,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  text-align: left;
 }
 
 .file-pill strong {
@@ -708,6 +759,18 @@ body {
 
 .file-pill.pending {
   background: var(--qapita-secondary-soft);
+}
+
+.file-pill.generated {
+  background: linear-gradient(180deg, #fffdf7 0%, #fff3cf 100%);
+}
+
+.file-pill.downloadable:hover {
+  box-shadow: 0 14px 32px rgba(105, 65, 148, 0.12);
+}
+
+.file-pill:disabled {
+  cursor: default;
 }
 
 .error-banner {
