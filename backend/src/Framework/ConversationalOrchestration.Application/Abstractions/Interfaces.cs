@@ -117,14 +117,15 @@ public interface IAgentCatalog
     IAgent Resolve(string agentId);
 }
 
-public interface IMessageIntentClassifier
+public interface IConversationRoutingAgent
 {
-    Task<RoutingDecision> ClassifyAsync(
+    Task<RoutingDecision> RouteAsync(
         string message,
         ConversationThread conversation,
         IReadOnlyCollection<AgentOperation> operations,
         IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
+        IReadOnlyCollection<ChatMessage> reducedConversationHistory,
         IReadOnlyCollection<AgentDefinition> availableAgents,
         CancellationToken cancellationToken);
 }
@@ -347,7 +348,8 @@ public sealed record RoutingDecision(
     string? AgentId = null,
     string? OperationId = null,
     string? ReviewTaskId = null,
-    string? Explanation = null);
+    string? Explanation = null,
+    string? AssistantMessage = null);
 
 public enum RoutingDecisionType
 {
@@ -355,7 +357,8 @@ public enum RoutingDecisionType
     RespondToReviewTask = 2,
     AskStatus = 3,
     StartNewOperation = 4,
-    AmbiguousNeedClarification = 5
+    AmbiguousNeedClarification = 5,
+    AnswerDirectly = 6
 }
 
 public sealed record AgentExecutionResult(

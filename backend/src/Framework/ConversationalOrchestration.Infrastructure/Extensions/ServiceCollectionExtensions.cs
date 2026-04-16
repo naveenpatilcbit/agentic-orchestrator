@@ -12,6 +12,7 @@ using ConversationalOrchestration.Infrastructure.Repositories;
 using ConversationalOrchestration.Infrastructure.Workflows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using MongoDB.Driver;
 
 namespace ConversationalOrchestration.Infrastructure.Extensions;
@@ -42,11 +43,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<MicrosoftExtensionsAiStructuredLlmClient>();
         services.AddSingleton<IStructuredLlmClient>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddSingleton<ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
-        services.AddScoped<IMessageIntentClassifier, LlmMessageIntentClassifier>();
+        services.AddScoped<IConversationRoutingAgent, LlmConversationRoutingAgent>();
         services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();
         services.AddScoped<IReviewPayloadRevisionService, LlmReviewPayloadRevisionService>();
         services.AddScoped<IConversationHistoryCompactionService, ConversationHistoryCompactionService>();
         services.AddSingleton<MongoCollections>();
+        services.AddHostedService<MongoIndexInitializationService>();
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();
         services.AddScoped<IAgentOperationRepository, AgentOperationRepository>();

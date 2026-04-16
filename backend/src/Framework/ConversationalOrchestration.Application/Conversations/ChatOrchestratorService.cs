@@ -106,6 +106,14 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             case RoutingDecisionType.AskStatus:
                 await HandleStatusRequestAsync(conversation, routingDecision, context, cancellationToken);
                 break;
+            case RoutingDecisionType.AnswerDirectly:
+                await AddAssistantMessageAsync(
+                    conversation.Id,
+                    context,
+                    routingDecision.AssistantMessage ?? "I can help with that.",
+                    null,
+                    "chat");
+                break;
             default:
                 await AddAssistantMessageAsync(
                     conversation.Id,
@@ -218,9 +226,53 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         conversation.LastFocusedOperationId = operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
-        var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
-        var result = await agent.StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
-        await PersistAgentResultAsync(conversation, result, context, cancellationToken);
+        try
+        {
+            var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
+            var result = await agent.StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
+            await PersistAgentResultAsync(conversation, result, context, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Agent {AgentId} failed to start operation {OperationId} for tenant {TenantId} conversation {ConversationId}.",
+                agent.Definition.Id,
+                operation.Id,
+                context.TenantId,
+                conversation.Id);
+
+            operation.Status = AgentOperationStatus.Failed;
+            operation.CurrentStep = "StartFailed";
+            operation.PendingClarification = "The operation could not be started. Retry the request from this conversation once the issue is addressed.";
+            operation.Summary = exception.Message;
+            operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
+
+            await _auditEventRepository.AddAsync(
+                new AuditEvent
+                {
+                    TenantId = context.TenantId,
+                    ConversationId = conversation.Id,
+                    OperationId = operation.Id,
+                    EventType = "AgentStartFailed",
+                    ActorType = "Framework",
+                    ActorId = nameof(ChatOrchestratorService),
+                    DataJson = JsonContent.Serialize(new
+                    {
+                        agentId = agent.Definition.Id,
+                        error = exception.Message
+                    })
+                },
+                cancellationToken);
+
+            await AddAssistantMessageAsync(
+                conversation.Id,
+                context,
+                $"I couldn't start {agent.Definition.DisplayName} yet: {exception.Message}",
+                operation.Id,
+                "status");
+        }
     }
 
     private async Task HandleContinueOperationAsync(

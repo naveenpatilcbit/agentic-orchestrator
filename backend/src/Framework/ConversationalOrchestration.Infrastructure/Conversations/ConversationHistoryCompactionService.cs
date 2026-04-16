@@ -48,6 +48,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             return;
         }
 
+        // Persist the latest reduced transcript so other callers can reuse it without re-running
+        // compaction every time they need conversation context for LLM prompts.
         var reducedMessages = await ReduceMessagesAsync(
             messages,
             ConversationTargetMessageCount,
@@ -84,6 +86,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         if (!string.IsNullOrWhiteSpace(conversation.ReducedHistoryJson) &&
             conversation.ReducedHistorySourceCount == messages.Count)
         {
+            // The reduced snapshot is keyed by source message count, so it is safe to reuse until
+            // a new raw message lands in the conversation.
             return LoadStoredMessages(conversation.ReducedHistoryJson);
         }
 
@@ -120,6 +124,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             return Array.Empty<ChatMessage>();
         }
 
+        // Operation-scoped compaction keeps slot-filling and clarification prompts focused on one
+        // unit of work even when the parent conversation contains multiple operations.
         return await ReduceMessagesAsync(
             operationMessages,
             OperationTargetMessageCount,
@@ -146,6 +152,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         var chatClient = _chatClientFactory.TryGetChatClient(LlmProfile.InputCompletion);
         if (chatClient is not null)
         {
+            // Prefer an LLM summary once the transcript grows large enough because it usually keeps
+            // more intent-carrying context than a simple truncation strategy.
             var summarizingReducer = new SummarizingChatReducer(chatClient, targetCount, thresholdCount);
             var summarized = await summarizingReducer.ReduceAsync(chatMessages, cancellationToken);
             if (summarized is not null)
@@ -154,6 +162,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             }
         }
 
+        // Fall back to deterministic message counting when no summarizer is available or the
+        // summarizer cannot produce a reduced transcript.
         var countingReducer = new MessageCountingChatReducer(targetCount);
         var counted = await countingReducer.ReduceAsync(chatMessages, cancellationToken);
         return (counted ?? chatMessages).ToArray();

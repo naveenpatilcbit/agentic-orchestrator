@@ -1,5 +1,6 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Application.Support;
+using ConversationalOrchestration.Domain.Agents;
 using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Operations;
 
@@ -47,13 +48,35 @@ internal static class AgentInputStateSupport
     public static IReadOnlyCollection<ConversationMessage> GetRelevantConversationHistory(
         IReadOnlyCollection<ConversationMessage> conversationHistory,
         ConversationMessage userMessage,
-        AgentOperation operation) =>
-        conversationHistory
+        AgentOperation operation)
+    {
+        var operationScopedHistory = conversationHistory
             .Where(message => message.OperationId == operation.Id || message.Id == userMessage.Id)
             .OrderByDescending(message => message.CreatedAtUtc)
             .Take(8)
             .OrderBy(message => message.CreatedAtUtc)
             .ToArray();
+
+        if (operationScopedHistory.Length > 1 ||
+            operation.Status != AgentOperationStatus.Received ||
+            !string.Equals(operation.CurrentStep, "Intake", StringComparison.OrdinalIgnoreCase))
+        {
+            return operationScopedHistory;
+        }
+
+        // During master-agent intake, the key details may still live on general conversation
+        // messages that were exchanged before the real operation existed. Keep a short recent slice
+        // of those unscoped turns so the target agent can validate the startup fields cleanly.
+        return conversationHistory
+            .Where(message =>
+                string.IsNullOrWhiteSpace(message.OperationId) ||
+                message.OperationId == operation.Id ||
+                message.Id == userMessage.Id)
+            .OrderByDescending(message => message.CreatedAtUtc)
+            .Take(8)
+            .OrderBy(message => message.CreatedAtUtc)
+            .ToArray();
+    }
 
     public static string? GetValue(IReadOnlyDictionary<string, string?> payload, string key) =>
         payload.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)

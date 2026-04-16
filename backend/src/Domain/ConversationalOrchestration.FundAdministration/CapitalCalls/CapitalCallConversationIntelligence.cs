@@ -51,6 +51,7 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
             operationId,
             latestMessage,
             "Capture the initial capital call request details from the conversation.",
+            useConversationHistory: true,
             cancellationToken);
 
     public Task<CapitalCallIntentPatch> InterpretClarificationAsync(
@@ -65,6 +66,7 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
             operationId,
             latestMessage,
             "Capture only the new clarification values or explicit overrides from the conversation.",
+            useConversationHistory: false,
             cancellationToken);
 
     private async Task<CapitalCallIntentPatch> ExtractPatchAsync(
@@ -73,9 +75,12 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
         string operationId,
         string latestMessage,
         string taskInstruction,
+        bool useConversationHistory,
         CancellationToken cancellationToken)
     {
-        var reducedMessages = await LoadCompactedMessagesAsync(tenantId, conversationId, operationId, cancellationToken);
+        var reducedMessages = useConversationHistory
+            ? await LoadCompactedConversationMessagesAsync(tenantId, conversationId, cancellationToken)
+            : await LoadCompactedOperationMessagesAsync(tenantId, conversationId, operationId, cancellationToken);
         var effectiveLatestMessage = ResolveEffectiveLatestMessage(latestMessage, reducedMessages);
         var historyTranscript = BuildTranscript(reducedMessages);
         _logger.LogInformation(
@@ -133,7 +138,19 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
         return new CapitalCallIntentPatch();
     }
 
-    private async Task<IReadOnlyList<ChatMessage>> LoadCompactedMessagesAsync(
+    private async Task<IReadOnlyList<ChatMessage>> LoadCompactedConversationMessagesAsync(
+        string tenantId,
+        string conversationId,
+        CancellationToken cancellationToken)
+    {
+        var reduced = await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
+            tenantId,
+            conversationId,
+            cancellationToken);
+        return reduced.ToArray();
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> LoadCompactedOperationMessagesAsync(
         string tenantId,
         string conversationId,
         string operationId,
@@ -143,6 +160,18 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
             tenantId,
             conversationId,
             operationId,
+            cancellationToken);
+
+        if (reduced.Count > 0)
+        {
+            return reduced.ToArray();
+        }
+
+        // The very first startup handoff can happen before older intake turns are attached to the
+        // new operation, so fall back to the reduced conversation transcript when needed.
+        reduced = await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
+            tenantId,
+            conversationId,
             cancellationToken);
         return reduced.ToArray();
     }

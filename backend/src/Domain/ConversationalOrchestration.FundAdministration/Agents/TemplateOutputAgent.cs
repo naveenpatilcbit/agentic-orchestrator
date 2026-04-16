@@ -12,7 +12,7 @@ namespace ConversationalOrchestration.FundAdministration.Agents;
 
 public sealed class TemplateOutputAgent : IAgent
 {
-    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> InputFields =
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> StartupFields =
     [
         new("sourceOperationId", "source operation id", "Approved operation id whose reviewed data should be used for the template output.", true),
         new("templateName", "template name", "Optional target template or workbook name to use for the generated output.", false, "Capital Call LP Notice Workbook")
@@ -33,7 +33,11 @@ public sealed class TemplateOutputAgent : IAgent
         FundAdministrationAgentIds.TemplateOutput,
         "Template Output Agent",
         "Takes approved workflow data from another operation and renders it into a reusable output template.",
-        AgentExecutionMode.InlineFunction);
+        AgentExecutionMode.InlineFunction,
+        new AgentStartRequirements(
+            StartupFields,
+            AllowsPartialStart: false,
+            Guidance: "Try to identify the approved source operation before starting. Template choice is optional.")); 
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
@@ -72,7 +76,8 @@ public sealed class TemplateOutputAgent : IAgent
         var payload = await CompleteInputsAsync(conversationHistory, userMessage, operation, attachments, cancellationToken);
         AgentInputStateSupport.MergeIfPresent(payload, "templateName", attachments.FirstOrDefault()?.FileName);
 
-        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(InputFields, payload);
+        var inputFields = Definition.StartRequirements?.Fields ?? Array.Empty<AgentInputFieldDefinition>();
+        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(inputFields, payload);
         var templateName = AgentInputStateSupport.GetValue(payload, "templateName");
         operation.Title = string.IsNullOrWhiteSpace(templateName)
             ? "Template Output"
@@ -82,12 +87,12 @@ public sealed class TemplateOutputAgent : IAgent
         {
             operation.Status = AgentOperationStatus.ClarificationRequired;
             operation.CurrentStep = "CollectTemplateOutputInputs";
-            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(InputFields, missingRequiredFields, "generate the template output");
+            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(inputFields, missingRequiredFields, "generate the template output");
             operation.Summary = "Waiting for the source operation that contains approved data.";
             operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
             return new AgentExecutionResult(
-                AgentInputStateSupport.BuildAssistantClarificationMessage(InputFields, missingRequiredFields, "template output generation"),
+                AgentInputStateSupport.BuildAssistantClarificationMessage(inputFields, missingRequiredFields, "template output generation"),
                 operation,
                 [new AgentAction
                 {
@@ -171,7 +176,7 @@ public sealed class TemplateOutputAgent : IAgent
                 AgentInputStateSupport.GetRelevantConversationHistory(conversationHistory, userMessage, operation),
                 attachments,
                 currentValues,
-                InputFields),
+                Definition.StartRequirements?.Fields ?? Array.Empty<AgentInputFieldDefinition>()),
             cancellationToken);
 
         return new Dictionary<string, string?>(completion.Values, StringComparer.OrdinalIgnoreCase);

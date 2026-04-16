@@ -136,21 +136,35 @@ public sealed class ReviewTaskService : IReviewTaskService
         reviewTask.FinalPayloadJson = finalPayloadJson;
         reviewTask.Notes = notes;
         reviewTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
 
         operation.ActiveReviewTaskId = null;
         operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        operation.Status = outcome.ContinuesWorkflow
-            ? AgentOperationStatus.Running
-            : AgentOperationStatus.ClarificationRequired;
-        operation.CurrentStep = outcome.ContinuesWorkflow
-            ? "ResumeRequested"
-            : reviewTask.Status == ReviewTaskStatus.NeedsChanges
+        if (outcome.ContinuesWorkflow)
+        {
+            operation.Status = AgentOperationStatus.Running;
+            operation.CurrentStep = "ResumeRequested";
+            operation.PendingClarification = null;
+
+            var handler = _reviewContinuationHandlers.FirstOrDefault(candidate => candidate.CanHandle(operation, reviewTask));
+            if (handler is not null)
+            {
+                await handler.HandleApprovedAsync(
+                    new ReviewContinuationContext(conversation, operation, reviewTask, context),
+                    cancellationToken);
+            }
+        }
+        else
+        {
+            operation.Status = AgentOperationStatus.ClarificationRequired;
+            operation.CurrentStep = reviewTask.Status == ReviewTaskStatus.NeedsChanges
                 ? "ReviewNeedsChanges"
                 : "ReviewRejected";
-        operation.PendingClarification = outcome.ContinuesWorkflow
-            ? null
-            : outcome.PendingClarification;
+            operation.PendingClarification = outcome.PendingClarification;
+        }
+
+        reviewTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
         await _operationRepository.UpsertAsync(operation, cancellationToken);
 
         if (ShouldEchoCommentToConversation(request))
@@ -208,17 +222,6 @@ public sealed class ReviewTaskService : IReviewTaskService
                 })
             },
             cancellationToken);
-
-        if (outcome.ContinuesWorkflow)
-        {
-            var handler = _reviewContinuationHandlers.FirstOrDefault(candidate => candidate.CanHandle(operation, reviewTask));
-            if (handler is not null)
-            {
-                await handler.HandleApprovedAsync(
-                    new ReviewContinuationContext(conversation, operation, reviewTask, context),
-                    cancellationToken);
-            }
-        }
 
         return new ChatInteractionResult(
             outcome.ContinuesWorkflow

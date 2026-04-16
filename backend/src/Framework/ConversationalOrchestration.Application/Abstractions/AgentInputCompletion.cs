@@ -1,14 +1,8 @@
 using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
+using ConversationalOrchestration.Domain.Agents;
 
 namespace ConversationalOrchestration.Application.Abstractions;
-
-public sealed record AgentInputFieldDefinition(
-    string Name,
-    string Label,
-    string Description,
-    bool Required,
-    string? Example = null);
 
 public sealed record AgentInputCompletionRequest(
     string AgentId,

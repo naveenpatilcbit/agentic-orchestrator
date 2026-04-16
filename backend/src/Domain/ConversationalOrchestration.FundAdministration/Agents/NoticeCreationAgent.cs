@@ -13,6 +13,13 @@ namespace ConversationalOrchestration.FundAdministration.Agents;
 
 public sealed class NoticeCreationAgent : IAgent
 {
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> StartupFields =
+    [
+        new("fundName", "fund name", "Name of the fund for which the capital call notice should be created.", true, "Apex Fund I"),
+        new("capitalCallAmount", "capital call amount", "Total amount to raise for the notice.", true, "100000"),
+        new("noticeDate", "notice date", "Optional effective or notice date if the user already knows it.", false, "2026-04-17")
+    ];
+
     private readonly IFundAdministrationWorkflowDispatcher _workflowDispatcher;
 
     public NoticeCreationAgent(IFundAdministrationWorkflowDispatcher workflowDispatcher)
@@ -24,7 +31,10 @@ public sealed class NoticeCreationAgent : IAgent
         FundAdministrationAgentIds.NoticeCreation,
         "Notice Creation Helper",
         "Extracts partner and feeder commitment data for a capital call notice, routes it through human review, then calculates approved allocations for downstream template output.",
-        AgentExecutionMode.Workflow);
+        AgentExecutionMode.Workflow,
+        new AgentStartRequirements(
+            StartupFields,
+            Guidance: "Try to gather the fund name and capital call amount up front. If the source data is not already available in the configured provider, the agent may still need a CSV upload.")); 
 
     public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,

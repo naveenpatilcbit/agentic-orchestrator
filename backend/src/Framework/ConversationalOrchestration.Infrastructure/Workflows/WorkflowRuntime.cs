@@ -101,21 +101,22 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         var pendingRequest = await _workflowPendingRequestRepository.GetAsync(request.PendingRequestId, request.TenantId, cancellationToken)
             ?? throw new InvalidOperationException($"Workflow pending request '{request.PendingRequestId}' was not found.");
 
+        if (!string.Equals(pendingRequest.WorkflowInstanceId, instance.Id, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Workflow pending request '{pendingRequest.Id}' does not belong to workflow instance '{instance.Id}'.");
+        }
+
+        if (pendingRequest.Status != WorkflowPendingRequestStatus.Open)
+        {
+            throw new InvalidOperationException(
+                $"Workflow pending request '{pendingRequest.Id}' is already in status '{pendingRequest.Status}'.");
+        }
+
         var definition = _workflowRegistry.Resolve(instance.WorkflowName);
         var checkpointId = request.CheckpointId ?? instance.LatestCheckpointId
             ?? throw new InvalidOperationException($"Workflow instance '{instance.Id}' does not have a checkpoint to resume.");
-
-        pendingRequest.Status = WorkflowPendingRequestStatus.Responded;
         pendingRequest.ResponsePayloadJson = request.ResponsePayloadJson;
-        pendingRequest.RespondedAtUtc = DateTimeOffset.UtcNow;
-        pendingRequest.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        await _workflowPendingRequestRepository.UpsertAsync(pendingRequest, cancellationToken);
-
-        instance.Status = WorkflowInstanceStatus.Running;
-        instance.CurrentStep = $"Resuming:{pendingRequest.PortId}";
-        instance.LastPendingRequestId = pendingRequest.Id;
-        instance.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
 
         var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
@@ -124,6 +125,18 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         _ = run.NewEvents.ToArray();
         var externalResponse = CreateExternalResponse(definition, pendingRequest);
         await run.ResumeAsync([externalResponse], cancellationToken);
+
+        var resumedAtUtc = DateTimeOffset.UtcNow;
+        pendingRequest.Status = WorkflowPendingRequestStatus.Responded;
+        pendingRequest.RespondedAtUtc = resumedAtUtc;
+        pendingRequest.UpdatedAtUtc = resumedAtUtc;
+        await _workflowPendingRequestRepository.UpsertAsync(pendingRequest, cancellationToken);
+
+        instance.Status = WorkflowInstanceStatus.Running;
+        instance.CurrentStep = $"Resuming:{pendingRequest.PortId}";
+        instance.LastPendingRequestId = pendingRequest.Id;
+        instance.UpdatedAtUtc = resumedAtUtc;
+        await _workflowInstanceRepository.UpsertAsync(instance, cancellationToken);
 
         var processingResult = await ProcessRunAsync(definition, instance, run, cancellationToken);
         return await PersistRunAsync(instance, run, processingResult, cancellationToken);

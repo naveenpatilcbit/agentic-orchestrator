@@ -9,12 +9,17 @@ namespace ConversationalOrchestration.Application.Operations;
 public sealed class MessageRoutingService : IMessageRoutingService
 {
     private readonly IAgentCatalog _agentCatalog;
-    private readonly IMessageIntentClassifier _intentClassifier;
+    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
+    private readonly IConversationRoutingAgent _routingAgent;
 
-    public MessageRoutingService(IAgentCatalog agentCatalog, IMessageIntentClassifier intentClassifier)
+    public MessageRoutingService(
+        IAgentCatalog agentCatalog,
+        IConversationHistoryCompactionService conversationHistoryCompactionService,
+        IConversationRoutingAgent routingAgent)
     {
         _agentCatalog = agentCatalog;
-        _intentClassifier = intentClassifier;
+        _conversationHistoryCompactionService = conversationHistoryCompactionService;
+        _routingAgent = routingAgent;
     }
 
     public async Task<RoutingDecision> DecideAsync(
@@ -29,21 +34,27 @@ public sealed class MessageRoutingService : IMessageRoutingService
             .Where(static operation => operation.Status is not AgentOperationStatus.Completed and not AgentOperationStatus.Failed and not AgentOperationStatus.Cancelled)
             .OrderByDescending(operation => operation.UpdatedAtUtc)
             .ToArray();
+        var availableAgents = _agentCatalog.List();
+        var reducedConversationHistory = await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
+            conversation.TenantId,
+            conversation.Id,
+            cancellationToken);
 
-        var classifierDecision = await _intentClassifier.ClassifyAsync(
+        var classifierDecision = await _routingAgent.RouteAsync(
             message,
             conversation,
             activeOperations,
             reviewTasks,
             attachments,
-            _agentCatalog.List(),
+            reducedConversationHistory,
+            availableAgents,
             cancellationToken);
 
         return NormalizeDecision(
             classifierDecision,
             activeOperations,
             reviewTasks,
-            _agentCatalog.List().Select(agent => agent.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
+            availableAgents.Select(agent => agent.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
     private static RoutingDecision NormalizeDecision(
@@ -58,6 +69,7 @@ public sealed class MessageRoutingService : IMessageRoutingService
             RoutingDecisionType.RespondToReviewTask => NormalizeReviewTask(decision, activeOperations, reviewTasks),
             RoutingDecisionType.AskStatus => NormalizeAskStatus(decision, activeOperations),
             RoutingDecisionType.StartNewOperation => NormalizeStartNewOperation(decision, allowedAgentIds),
+            RoutingDecisionType.AnswerDirectly => NormalizeDirectAnswer(decision),
             _ => new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "The request is ambiguous.")
         };
     }
@@ -136,4 +148,12 @@ public sealed class MessageRoutingService : IMessageRoutingService
                 RoutingDecisionType.StartNewOperation,
                 decision.AgentId,
                 Explanation: decision.Explanation ?? "LLM classified the message as a new request.");
+
+    private static RoutingDecision NormalizeDirectAnswer(RoutingDecision decision) =>
+        string.IsNullOrWhiteSpace(decision.AssistantMessage)
+            ? new RoutingDecision(RoutingDecisionType.AmbiguousNeedClarification, Explanation: decision.Explanation ?? "The routing agent did not provide a direct answer.")
+            : new RoutingDecision(
+                RoutingDecisionType.AnswerDirectly,
+                Explanation: decision.Explanation ?? "The routing agent answered directly.",
+                AssistantMessage: decision.AssistantMessage);
 }

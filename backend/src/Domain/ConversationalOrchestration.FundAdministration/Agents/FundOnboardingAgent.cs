@@ -12,6 +12,8 @@ namespace ConversationalOrchestration.FundAdministration.Agents;
 
 public sealed class FundOnboardingAgent : IAgent
 {
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> StartupFields = [];
+
     private readonly IFundAdministrationWorkflowDispatcher _workflowDispatcher;
 
     public FundOnboardingAgent(IFundAdministrationWorkflowDispatcher workflowDispatcher)
@@ -23,7 +25,12 @@ public sealed class FundOnboardingAgent : IAgent
         FundAdministrationAgentIds.FundOnboarding,
         "Fund Onboarding Helper",
         "Starts the onboarding workflow, waits at review checkpoints, and resumes from stored workflow state.",
-        AgentExecutionMode.Workflow);
+        AgentExecutionMode.Workflow,
+        new AgentStartRequirements(
+            StartupFields,
+            AllowsPartialStart: false,
+            RequiresAttachment: true,
+            Guidance: "This workflow expects uploaded fund agreements or onboarding documents before it can start cleanly.")); 
 
     public async Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,

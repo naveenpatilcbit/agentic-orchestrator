@@ -11,7 +11,7 @@ namespace ConversationalOrchestration.FundAdministration.Agents;
 
 public sealed class OnePagerAgent : IAgent
 {
-    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> InputFields =
+    private static readonly IReadOnlyCollection<AgentInputFieldDefinition> StartupFields =
     [
         new("companyName", "company name", "Portfolio company name that should be used in the one-pager.", true, "Atlas Industrial"),
         new("formatName", "format name", "Preferred uploaded format or template name for the one-pager.", false, "Board Presentation Format")
@@ -28,7 +28,10 @@ public sealed class OnePagerAgent : IAgent
         FundAdministrationAgentIds.OnePager,
         "One Pager Generation Agent",
         "Builds a one-pager draft using internal portfolio data and the selected format.",
-        AgentExecutionMode.InlineFunction);
+        AgentExecutionMode.InlineFunction,
+        new AgentStartRequirements(
+            StartupFields,
+            Guidance: "Try to collect the company name before starting. The format can come from the user or an uploaded template.")); 
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
@@ -67,7 +70,8 @@ public sealed class OnePagerAgent : IAgent
         AgentInputStateSupport.MergeIfPresent(payload, "formatName", attachments.FirstOrDefault()?.FileName);
 
         var companyName = AgentInputStateSupport.GetValue(payload, "companyName");
-        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(InputFields, payload);
+        var inputFields = Definition.StartRequirements?.Fields ?? Array.Empty<AgentInputFieldDefinition>();
+        var missingRequiredFields = AgentInputStateSupport.GetMissingRequiredFieldNames(inputFields, payload);
 
         operation.Title = string.IsNullOrWhiteSpace(companyName)
             ? "One Pager Draft"
@@ -77,12 +81,12 @@ public sealed class OnePagerAgent : IAgent
         {
             operation.Status = AgentOperationStatus.ClarificationRequired;
             operation.CurrentStep = "CollectCompany";
-            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(InputFields, missingRequiredFields, "generate the one-pager");
+            operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(inputFields, missingRequiredFields, "generate the one-pager");
             operation.Summary = "Waiting for the target company.";
             operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
             return new AgentExecutionResult(
-                AgentInputStateSupport.BuildAssistantClarificationMessage(InputFields, missingRequiredFields, "one-pager generation"),
+                AgentInputStateSupport.BuildAssistantClarificationMessage(inputFields, missingRequiredFields, "one-pager generation"),
                 operation,
                 [new AgentAction
                 {
@@ -137,7 +141,7 @@ public sealed class OnePagerAgent : IAgent
                 AgentInputStateSupport.GetRelevantConversationHistory(conversationHistory, userMessage, operation),
                 attachments,
                 currentValues,
-                InputFields),
+                Definition.StartRequirements?.Fields ?? Array.Empty<AgentInputFieldDefinition>()),
             cancellationToken);
 
         return new Dictionary<string, string?>(completion.Values, StringComparer.OrdinalIgnoreCase);
