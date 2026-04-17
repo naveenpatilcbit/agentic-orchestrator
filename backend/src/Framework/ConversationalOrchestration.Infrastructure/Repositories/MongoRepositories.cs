@@ -86,6 +86,42 @@ public sealed class AgentOperationRepository : IAgentOperationRepository
             cancellationToken);
 }
 
+public sealed class OperationOutputRepository : IOperationOutputRepository
+{
+    private readonly MongoCollections _collections;
+
+    public OperationOutputRepository(MongoCollections collections)
+    {
+        _collections = collections;
+    }
+
+    public async Task<OperationOutput?> GetAsync(string outputId, string tenantId, CancellationToken cancellationToken) =>
+        await _collections.OperationOutputs.Find(item => item.Id == outputId && item.TenantId == tenantId)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public async Task<OperationOutput?> GetLatestByOperationAsync(string operationId, string tenantId, CancellationToken cancellationToken) =>
+        await _collections.OperationOutputs.Find(item =>
+                item.OperationId == operationId &&
+                item.TenantId == tenantId)
+            .SortByDescending(item => item.UpdatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public async Task<IReadOnlyCollection<OperationOutput>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken) =>
+        await _collections.OperationOutputs.Find(item =>
+                item.ConversationId == conversationId &&
+                item.TenantId == tenantId &&
+                item.Status == OperationOutputStatus.Published)
+            .SortByDescending(item => item.UpdatedAtUtc)
+            .ToListAsync(cancellationToken);
+
+    public Task UpsertAsync(OperationOutput output, CancellationToken cancellationToken) =>
+        _collections.OperationOutputs.ReplaceOneAsync(
+            item => item.Id == output.Id && item.TenantId == output.TenantId,
+            output,
+            new ReplaceOptions { IsUpsert = true },
+            cancellationToken);
+}
+
 public sealed class ReviewTaskRepository : IReviewTaskRepository
 {
     private readonly MongoCollections _collections;

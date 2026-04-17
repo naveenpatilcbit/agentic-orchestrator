@@ -213,8 +213,22 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             AgentId = agent.Definition.Id,
             Title = agent.Definition.DisplayName,
             CreatedByUserId = context.UserId,
-            Status = AgentOperationStatus.Received
+            Status = AgentOperationStatus.Received,
+            SourceOperationId = routingDecision.SourceOperationId,
+            SourceOutputId = routingDecision.SourceOutputId
         };
+
+        if (!string.IsNullOrWhiteSpace(routingDecision.SourceOperationId) ||
+            !string.IsNullOrWhiteSpace(routingDecision.SourceOutputId))
+        {
+            // Seed resolved lineage inputs onto the operation itself so agents can consume follow-up
+            // work from completed outputs without re-parsing those ids from user chat text.
+            operation.DataJson = JsonContent.Serialize(new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            {
+                [StandardAgentInputNames.SourceOperationId] = routingDecision.SourceOperationId,
+                [StandardAgentInputNames.SourceOutputId] = routingDecision.SourceOutputId
+            });
+        }
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
         _logger.LogInformation(

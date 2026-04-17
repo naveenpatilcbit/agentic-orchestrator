@@ -60,6 +60,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
     private readonly IWorkflowPendingRequestRepository _workflowPendingRequestRepository;
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAgentOperationRepository _operationRepository;
+    private readonly IOperationOutputRepository _operationOutputRepository;
     private readonly IConversationMessageRepository _conversationMessageRepository;
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
@@ -72,6 +73,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         IWorkflowPendingRequestRepository workflowPendingRequestRepository,
         IReviewTaskRepository reviewTaskRepository,
         IAgentOperationRepository operationRepository,
+        IOperationOutputRepository operationOutputRepository,
         IConversationMessageRepository conversationMessageRepository,
         IAuditEventRepository auditEventRepository,
         IConversationHistoryCompactionService conversationHistoryCompactionService,
@@ -83,6 +85,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         _workflowPendingRequestRepository = workflowPendingRequestRepository;
         _reviewTaskRepository = reviewTaskRepository;
         _operationRepository = operationRepository;
+        _operationOutputRepository = operationOutputRepository;
         _conversationMessageRepository = conversationMessageRepository;
         _auditEventRepository = auditEventRepository;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
@@ -625,22 +628,14 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
             }
 
+            var publishedOutput = await PublishCapitalCallOutputAsync(operation, completedPayload, cancellationToken);
+
             operation.Status = AgentOperationStatus.Completed;
             operation.CurrentStep = "TemplateRendering";
             operation.PendingClarification = null;
             operation.ActiveReviewTaskId = null;
             operation.Summary = "Final capital call allocations are confirmed. Template rendering is the current step.";
-            // Keep the approved typed workflow output on the operation so downstream agents, like
-            // template rendering, do not need to recompute or reinterpret the workflow result.
-            operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
-            {
-                RequestState = completedPayload.ReviewedExtraction.RequestState,
-                ReviewedExtraction = completedPayload.ReviewedExtraction,
-                FundName = completedPayload.Notice.RootFundName,
-                Notice = completedPayload.Notice,
-                ReviewDownloadRoute = completedPayload.ReviewedExtraction.ReviewDownloadRoute,
-                ReviewFileName = completedPayload.ReviewedExtraction.ReviewFileName
-            });
+            operation.DataJson = publishedOutput.PayloadJson;
             await _operationRepository.UpsertAsync(operation, cancellationToken);
             await AddConversationUpdateAsync(
                 operation,
@@ -844,6 +839,44 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             cancellationToken);
     }
 
+    private async Task<OperationOutput> PublishCapitalCallOutputAsync(
+        AgentOperation operation,
+        CapitalCallWorkflowCompleted completedPayload,
+        CancellationToken cancellationToken)
+    {
+        var output = await _operationOutputRepository.GetLatestByOperationAsync(operation.Id, operation.TenantId, cancellationToken)
+            ?? new OperationOutput
+            {
+                TenantId = operation.TenantId,
+                ConversationId = operation.ConversationId,
+                OperationId = operation.Id,
+                SourceAgentId = operation.AgentId,
+                OutputType = FundAdministrationOutputTypes.CapitalCallReviewedAllocations
+            };
+
+        output.DisplayName = string.IsNullOrWhiteSpace(completedPayload.Notice.RootFundName)
+            ? "Capital call reviewed allocations"
+            : $"{completedPayload.Notice.RootFundName} reviewed capital call allocations";
+        output.Summary = "Approved capital call allocations ready for downstream workflows.";
+        output.Status = OperationOutputStatus.Published;
+        output.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        var operationData = new CapitalCallOperationData
+        {
+            OutputId = output.Id,
+            RequestState = completedPayload.ReviewedExtraction.RequestState,
+            ReviewedExtraction = completedPayload.ReviewedExtraction,
+            FundName = completedPayload.Notice.RootFundName,
+            Notice = completedPayload.Notice,
+            ReviewDownloadRoute = completedPayload.ReviewedExtraction.ReviewDownloadRoute,
+            ReviewFileName = completedPayload.ReviewedExtraction.ReviewFileName
+        };
+
+        output.PayloadJson = JsonContent.Serialize(operationData);
+        await _operationOutputRepository.UpsertAsync(output, cancellationToken);
+        return output;
+    }
+
     private static AuditEvent BuildAuditEvent(AgentOperation operation, string eventType, object payload) =>
         new()
         {
@@ -876,6 +909,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         target.Summary = source.Summary;
         target.PendingClarification = source.PendingClarification;
         target.ActiveReviewTaskId = source.ActiveReviewTaskId;
+        target.SourceOperationId = source.SourceOperationId;
+        target.SourceOutputId = source.SourceOutputId;
         target.WorkflowInstanceId = source.WorkflowInstanceId;
         target.LatestCheckpointId = source.LatestCheckpointId;
         target.DataJson = source.DataJson;

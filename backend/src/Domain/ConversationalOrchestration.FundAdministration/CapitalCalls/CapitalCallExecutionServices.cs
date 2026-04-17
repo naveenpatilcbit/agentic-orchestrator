@@ -53,17 +53,17 @@ public interface ITemplateOutputGenerationService
     Task<TemplateOutputGenerationResult> GenerateAsync(
         string tenantId,
         string conversationId,
-        string sourceOperationId,
+        string sourceOutputId,
         string? templateName,
         CancellationToken cancellationToken);
 }
 
 public interface ITemplateOutputSourceHandler
 {
-    bool CanHandle(AgentOperation sourceOperation);
+    bool CanHandle(OperationOutput sourceOutput);
 
     Task<TemplateOutputGenerationResult> GenerateAsync(
-        AgentOperation sourceOperation,
+        OperationOutput sourceOutput,
         string conversationId,
         string? templateName,
         CancellationToken cancellationToken);
@@ -906,16 +906,16 @@ public sealed class CapitalCallReviewArtifactService : ICapitalCallReviewArtifac
 
 public sealed class TemplateOutputGenerationService : ITemplateOutputGenerationService
 {
-    private readonly IAgentOperationRepository _agentOperationRepository;
+    private readonly IOperationOutputRepository _operationOutputRepository;
     private readonly IReadOnlyCollection<ITemplateOutputSourceHandler> _sourceHandlers;
     private readonly ILogger<TemplateOutputGenerationService> _logger;
 
     public TemplateOutputGenerationService(
-        IAgentOperationRepository agentOperationRepository,
+        IOperationOutputRepository operationOutputRepository,
         IEnumerable<ITemplateOutputSourceHandler> sourceHandlers,
         ILogger<TemplateOutputGenerationService> logger)
     {
-        _agentOperationRepository = agentOperationRepository;
+        _operationOutputRepository = operationOutputRepository;
         _sourceHandlers = sourceHandlers.ToArray();
         _logger = logger;
     }
@@ -923,24 +923,25 @@ public sealed class TemplateOutputGenerationService : ITemplateOutputGenerationS
     public async Task<TemplateOutputGenerationResult> GenerateAsync(
         string tenantId,
         string conversationId,
-        string sourceOperationId,
+        string sourceOutputId,
         string? templateName,
         CancellationToken cancellationToken)
     {
-        var sourceOperation = await _agentOperationRepository.GetAsync(sourceOperationId, tenantId, cancellationToken)
-            ?? throw new InvalidOperationException($"Source operation '{sourceOperationId}' could not be found.");
+        var sourceOutput = await _operationOutputRepository.GetAsync(sourceOutputId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException($"Source output '{sourceOutputId}' could not be found.");
 
-        var handler = _sourceHandlers.FirstOrDefault(candidate => candidate.CanHandle(sourceOperation))
-            ?? throw new InvalidOperationException($"No template output handler is registered for source agent '{sourceOperation.AgentId}'.");
+        var handler = _sourceHandlers.FirstOrDefault(candidate => candidate.CanHandle(sourceOutput))
+            ?? throw new InvalidOperationException($"No template output handler is registered for output type '{sourceOutput.OutputType}'.");
 
         _logger.LogInformation(
-            "Generating template output for tenant {TenantId}. SourceOperationId={SourceOperationId} SourceAgentId={SourceAgentId} TemplateName={TemplateName}",
+            "Generating template output for tenant {TenantId}. SourceOutputId={SourceOutputId} SourceAgentId={SourceAgentId} OutputType={OutputType} TemplateName={TemplateName}",
             tenantId,
-            sourceOperationId,
-            sourceOperation.AgentId,
+            sourceOutputId,
+            sourceOutput.SourceAgentId,
+            sourceOutput.OutputType,
             templateName);
 
-        return await handler.GenerateAsync(sourceOperation, conversationId, templateName, cancellationToken);
+        return await handler.GenerateAsync(sourceOutput, conversationId, templateName, cancellationToken);
     }
 }
 
@@ -959,19 +960,19 @@ public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSour
         _logger = logger;
     }
 
-    public bool CanHandle(AgentOperation sourceOperation) =>
-        string.Equals(sourceOperation.AgentId, FundAdministration.Agents.FundAdministrationAgentIds.NoticeCreation, StringComparison.Ordinal);
+    public bool CanHandle(OperationOutput sourceOutput) =>
+        string.Equals(sourceOutput.OutputType, FundAdministrationOutputTypes.CapitalCallReviewedAllocations, StringComparison.Ordinal);
 
     public async Task<TemplateOutputGenerationResult> GenerateAsync(
-        AgentOperation sourceOperation,
+        OperationOutput sourceOutput,
         string conversationId,
         string? templateName,
         CancellationToken cancellationToken)
     {
-        var data = JsonContent.Deserialize<CapitalCallOperationData>(sourceOperation.DataJson)
-            ?? throw new InvalidOperationException("The source capital call operation does not contain any approved allocation data.");
+        var data = JsonContent.Deserialize<CapitalCallOperationData>(sourceOutput.PayloadJson)
+            ?? throw new InvalidOperationException("The source capital call output does not contain any approved allocation data.");
         var notice = data.Notice
-            ?? throw new InvalidOperationException("The source capital call operation does not contain a valid reviewed capital call payload.");
+            ?? throw new InvalidOperationException("The source capital call output does not contain a valid reviewed capital call payload.");
 
         await using var stream = CapitalCallWorkbookBuilder.BuildWorkbookStream(notice);
         var fileName = BuildTemplateOutputFileName(notice.RootFundName, templateName);
@@ -981,13 +982,13 @@ public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSour
             ExcelContentType,
             conversationId,
             FileAssetKind.GeneratedArtifact,
-            new TenantExecutionContext(sourceOperation.TenantId, "workflow", "Template Output Operation"),
+            new TenantExecutionContext(sourceOutput.TenantId, "workflow", "Template Output Operation"),
             cancellationToken);
 
         var downloadRoute = $"/api/files/{file.Id}/download";
         _logger.LogInformation(
-            "Generated template output workbook from capital call source operation {SourceOperationId}. FileAssetId={FileAssetId} TemplateName={TemplateName}",
-            sourceOperation.Id,
+            "Generated template output workbook from capital call source output {SourceOutputId}. FileAssetId={FileAssetId} TemplateName={TemplateName}",
+            sourceOutput.Id,
             file.Id,
             templateName);
 
@@ -996,7 +997,7 @@ public sealed class CapitalCallTemplateOutputSourceHandler : ITemplateOutputSour
             FileAssetId = file.Id,
             DownloadRoute = downloadRoute,
             FileName = file.FileName,
-            SourceOperationId = sourceOperation.Id,
+            SourceOperationId = sourceOutput.OperationId,
             Summary = string.IsNullOrWhiteSpace(templateName)
                 ? $"Generated a reusable template output workbook from the approved capital call allocations for {notice.RootFundName}."
                 : $"Generated the '{templateName}' template output workbook from the approved capital call allocations for {notice.RootFundName}."

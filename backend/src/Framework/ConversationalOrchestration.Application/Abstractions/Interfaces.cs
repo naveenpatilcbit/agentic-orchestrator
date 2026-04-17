@@ -52,6 +52,14 @@ public interface IAgentOperationRepository
     Task UpsertAsync(AgentOperation operation, CancellationToken cancellationToken);
 }
 
+public interface IOperationOutputRepository
+{
+    Task<OperationOutput?> GetAsync(string outputId, string tenantId, CancellationToken cancellationToken);
+    Task<OperationOutput?> GetLatestByOperationAsync(string operationId, string tenantId, CancellationToken cancellationToken);
+    Task<IReadOnlyCollection<OperationOutput>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
+    Task UpsertAsync(OperationOutput output, CancellationToken cancellationToken);
+}
+
 public interface IReviewTaskRepository
 {
     Task<ReviewTask?> GetAsync(string reviewTaskId, string tenantId, CancellationToken cancellationToken);
@@ -123,6 +131,7 @@ public interface IConversationRoutingAgent
         string message,
         ConversationThread conversation,
         IReadOnlyCollection<AgentOperation> operations,
+        IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
         IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
         IReadOnlyCollection<ChatMessage> reducedConversationHistory,
@@ -343,11 +352,25 @@ public sealed record WorkflowRunResult(
     IReadOnlyCollection<string> ActivatedExecutors,
     string? ErrorMessage = null);
 
+public sealed record CompletedOperationOutputSummary(
+    string Id,
+    string OperationId,
+    string? OperationTitle,
+    string SourceAgentId,
+    string OutputType,
+    string DisplayName,
+    string Summary,
+    IReadOnlyCollection<string> CompatibleAgentIds,
+    DateTimeOffset UpdatedAtUtc,
+    bool IsLastFocusedOperation = false);
+
 public sealed record RoutingDecision(
     RoutingDecisionType Type,
     string? AgentId = null,
     string? OperationId = null,
     string? ReviewTaskId = null,
+    string? SourceOperationId = null,
+    string? SourceOutputId = null,
     string? Explanation = null,
     string? AssistantMessage = null);
 

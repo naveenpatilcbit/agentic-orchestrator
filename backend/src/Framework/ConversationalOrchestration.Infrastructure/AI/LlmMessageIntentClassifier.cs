@@ -33,6 +33,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         string message,
         ConversationThread conversation,
         IReadOnlyCollection<AgentOperation> operations,
+        IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
         IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
         IReadOnlyCollection<ChatMessage> reducedConversationHistory,
@@ -43,7 +44,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
             new StructuredLlmRequest(
                 LlmProfile.Routing,
                 BuildSystemPrompt(),
-                BuildUserPrompt(message, conversation, operations, reviewTasks, attachments, reducedConversationHistory, availableAgents)),
+                BuildUserPrompt(message, conversation, operations, completedOutputs, reviewTasks, attachments, reducedConversationHistory, availableAgents)),
             cancellationToken);
 
         if (decision is null || string.IsNullOrWhiteSpace(decision.DecisionType))
@@ -74,7 +75,11 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         - Use only ids that exist in the provided context.
         - If the user is approving or rejecting a review task, prefer RespondToReviewTask.
         - If the user asks for status, use AskStatus.
+        - Completed outputs are reusable results from prior finished operations. Use them when the user asks to do the next step from prior approved work.
         - If the user is starting a fresh request for an available capability, inspect that agent's startRequirements, the reducedConversationHistory, and the available attachments before deciding whether the request is ready to start.
+        - If the requested agent depends on a compatible completed output, inspect completedOutputs and the agent sourceRequirements.
+        - When starting new work from a prior completed result, return StartNewOperation and set sourceOutputId when a specific completed output is clearly the best match.
+        - Prefer a completed output from the last focused operation when the user says things like "this", "that", or "now do the next step".
         - If the user clearly wants an available capability but required startup fields are still missing, use AnswerDirectly and ask only for the missing required inputs instead of starting the operation yet.
         - If the chosen agent requires an attachment and the attachment is not present, use AnswerDirectly and ask the user to upload it instead of starting the operation.
         - Optional startup fields can be mentioned helpfully, but they should not block StartNewOperation.
@@ -92,6 +97,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
           "agentId": "optional-agent-id",
           "operationId": "optional-operation-id",
           "reviewTaskId": "optional-review-task-id",
+          "sourceOutputId": "optional-completed-output-id for StartNewOperation",
           "explanation": "short explanation",
           "assistantMessage": "required only for AnswerDirectly"
         }
@@ -101,6 +107,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         string message,
         ConversationThread conversation,
         IReadOnlyCollection<AgentOperation> operations,
+        IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
         IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
         IReadOnlyCollection<ChatMessage> reducedConversationHistory,
@@ -136,6 +143,19 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
                 operation.PendingClarification,
                 operation.UpdatedAtUtc
             }),
+            completedOutputs = completedOutputs.Select(output => new
+            {
+                output.Id,
+                output.OperationId,
+                output.OperationTitle,
+                output.SourceAgentId,
+                output.OutputType,
+                output.DisplayName,
+                output.Summary,
+                output.CompatibleAgentIds,
+                output.IsLastFocusedOperation,
+                output.UpdatedAtUtc
+            }),
             reviewTasks = reviewTasks.Select(task => new
             {
                 task.Id,
@@ -166,6 +186,14 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
                             field.Required,
                             field.Example
                         })
+                    },
+                SourceRequirements = agent.SourceRequirements is null
+                    ? null
+                    : new
+                    {
+                        agent.SourceRequirements.RequiresSource,
+                        agent.SourceRequirements.Guidance,
+                        agent.SourceRequirements.AcceptedOutputTypes
                     }
             })
         };
@@ -190,6 +218,9 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         [JsonPropertyName("reviewTaskId")]
         public string? ReviewTaskId { get; init; }
 
+        [JsonPropertyName("sourceOutputId")]
+        public string? SourceOutputId { get; init; }
+
         [JsonPropertyName("explanation")]
         public string? Explanation { get; init; }
 
@@ -198,7 +229,14 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
 
         public RoutingDecision ToRoutingDecision() =>
             Enum.TryParse<RoutingDecisionType>(DecisionType, ignoreCase: true, out var routingDecisionType)
-                ? new RoutingDecision(routingDecisionType, AgentId, OperationId, ReviewTaskId, Explanation, AssistantMessage)
+                ? new RoutingDecision(
+                    routingDecisionType,
+                    AgentId,
+                    OperationId,
+                    ReviewTaskId,
+                    SourceOutputId: SourceOutputId,
+                    Explanation: Explanation,
+                    AssistantMessage: AssistantMessage)
                 : Ambiguous($"Unsupported decision type '{DecisionType}'.");
     }
 }

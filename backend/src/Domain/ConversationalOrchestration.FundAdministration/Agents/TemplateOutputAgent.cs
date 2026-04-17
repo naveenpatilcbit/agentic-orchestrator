@@ -14,7 +14,7 @@ public sealed class TemplateOutputAgent : IAgent
 {
     private static readonly IReadOnlyCollection<AgentInputFieldDefinition> StartupFields =
     [
-        new("sourceOperationId", "source operation id", "Approved operation id whose reviewed data should be used for the template output.", true),
+        new(StandardAgentInputNames.SourceOutputId, "source output id", "Completed output id whose approved data should be used for the template output.", true),
         new("templateName", "template name", "Optional target template or workbook name to use for the generated output.", false, "Capital Call LP Notice Workbook")
     ];
 
@@ -37,7 +37,11 @@ public sealed class TemplateOutputAgent : IAgent
         new AgentStartRequirements(
             StartupFields,
             AllowsPartialStart: false,
-            Guidance: "Try to identify the approved source operation before starting. Template choice is optional.")); 
+            Guidance: "Try to identify the completed source output before starting. Template choice is optional."),
+        new AgentSourceRequirements(
+            [FundAdministrationOutputTypes.CapitalCallReviewedAllocations],
+            RequiresSource: true,
+            Guidance: "I can generate the template output once you point me to the completed capital call output you want to use.")); 
 
     public Task<AgentExecutionResult> StartAsync(
         ConversationThread conversation,
@@ -88,7 +92,7 @@ public sealed class TemplateOutputAgent : IAgent
             operation.Status = AgentOperationStatus.ClarificationRequired;
             operation.CurrentStep = "CollectTemplateOutputInputs";
             operation.PendingClarification = AgentInputStateSupport.BuildPendingClarification(inputFields, missingRequiredFields, "generate the template output");
-            operation.Summary = "Waiting for the source operation that contains approved data.";
+            operation.Summary = "Waiting for the completed source output that contains approved data.";
             operation.DataJson = AgentInputStateSupport.SerializeValues(payload);
 
             return new AgentExecutionResult(
@@ -108,7 +112,7 @@ public sealed class TemplateOutputAgent : IAgent
             var result = await _templateOutputGenerationService.GenerateAsync(
                 context.TenantId,
                 operation.ConversationId,
-                payload["sourceOperationId"]!,
+                payload[StandardAgentInputNames.SourceOutputId]!,
                 templateName,
                 cancellationToken);
 

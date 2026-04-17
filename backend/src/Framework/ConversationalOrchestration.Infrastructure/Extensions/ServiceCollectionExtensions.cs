@@ -52,6 +52,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();
         services.AddScoped<IAgentOperationRepository, AgentOperationRepository>();
+        services.AddScoped<IOperationOutputRepository, OperationOutputRepository>();
         services.AddScoped<IReviewTaskRepository, ReviewTaskRepository>();
         services.AddScoped<IWorkflowInstanceRepository, WorkflowInstanceRepository>();
         services.AddScoped<IWorkflowPendingRequestRepository, WorkflowPendingRequestRepository>();

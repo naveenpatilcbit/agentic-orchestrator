@@ -46,6 +46,8 @@ public sealed class AgentOperation
     public string CreatedByUserId { get; set; } = string.Empty;
     public string? PendingClarification { get; set; }
     public string? ActiveReviewTaskId { get; set; }
+    public string? SourceOperationId { get; set; }
+    public string? SourceOutputId { get; set; }
     public string? WorkflowInstanceId { get; set; }
     public string? LatestCheckpointId { get; set; }
     public string? DataJson { get; set; }

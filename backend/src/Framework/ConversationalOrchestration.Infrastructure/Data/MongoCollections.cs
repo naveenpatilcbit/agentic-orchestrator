@@ -28,6 +28,9 @@ public sealed class MongoCollections
     public IMongoCollection<AgentOperation> Operations =>
         _database.GetCollection<AgentOperation>("operations");
 
+    public IMongoCollection<OperationOutput> OperationOutputs =>
+        _database.GetCollection<OperationOutput>("operation_outputs");
+
     public IMongoCollection<ReviewTask> ReviewTasks =>
         _database.GetCollection<ReviewTask>("review_tasks");
 

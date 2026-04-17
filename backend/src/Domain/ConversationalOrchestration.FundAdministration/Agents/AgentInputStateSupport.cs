@@ -11,9 +11,13 @@ internal static class AgentInputStateSupport
     public static Dictionary<string, string?> LoadValues(AgentOperation operation)
     {
         var payload = JsonContent.Deserialize<Dictionary<string, string?>>(operation.DataJson);
-        return payload is null
+        var values = payload is null
             ? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, string?>(payload, StringComparer.OrdinalIgnoreCase);
+
+        MergeIfPresent(values, StandardAgentInputNames.SourceOperationId, operation.SourceOperationId);
+        MergeIfPresent(values, StandardAgentInputNames.SourceOutputId, operation.SourceOutputId);
+        return values;
     }
 
     public static string SerializeValues(IDictionary<string, string?> payload)

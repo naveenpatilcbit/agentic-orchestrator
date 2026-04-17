@@ -27,6 +27,7 @@ public sealed class MongoIndexInitializationService : IHostedService
         await EnsureConversationIndexesAsync(cancellationToken);
         await EnsureMessageIndexesAsync(cancellationToken);
         await EnsureOperationIndexesAsync(cancellationToken);
+        await EnsureOperationOutputIndexesAsync(cancellationToken);
         await EnsureReviewTaskIndexesAsync(cancellationToken);
         await EnsureFileIndexesAsync(cancellationToken);
         await EnsureWorkflowIndexesAsync(cancellationToken);
@@ -65,6 +66,27 @@ public sealed class MongoIndexInitializationService : IHostedService
                     Builders<AgentOperation>.IndexKeys
                         .Ascending(item => item.TenantId)
                         .Ascending(item => item.ConversationId)
+                        .Descending(item => item.UpdatedAtUtc))
+            ],
+            cancellationToken: cancellationToken);
+
+    private Task EnsureOperationOutputIndexesAsync(CancellationToken cancellationToken) =>
+        _collections.OperationOutputs.Indexes.CreateManyAsync(
+            [
+                new CreateIndexModel<OperationOutput>(
+                    Builders<OperationOutput>.IndexKeys
+                        .Ascending(item => item.TenantId)
+                        .Ascending(item => item.ConversationId)
+                        .Descending(item => item.UpdatedAtUtc)),
+                new CreateIndexModel<OperationOutput>(
+                    Builders<OperationOutput>.IndexKeys
+                        .Ascending(item => item.TenantId)
+                        .Ascending(item => item.OperationId)
+                        .Descending(item => item.UpdatedAtUtc)),
+                new CreateIndexModel<OperationOutput>(
+                    Builders<OperationOutput>.IndexKeys
+                        .Ascending(item => item.TenantId)
+                        .Ascending(item => item.OutputType)
                         .Descending(item => item.UpdatedAtUtc))
             ],
             cancellationToken: cancellationToken);

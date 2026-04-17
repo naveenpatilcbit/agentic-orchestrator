@@ -211,8 +211,9 @@ public sealed class NoticeCreationAgent : IAgent
             Label = "Generate template output",
             PayloadJson = JsonContent.Serialize(new
             {
+                sourceOutputId = data.OutputId,
                 sourceOperationId = operation.Id,
-                startMessage = $"Generate template output for approved capital call operation {operation.Id}"
+                startMessage = "Generate template output from the approved capital call allocations"
             })
         });
 

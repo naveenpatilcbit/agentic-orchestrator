@@ -13,6 +13,11 @@ public sealed record AgentStartRequirements(
     bool RequiresAttachment = false,
     string? Guidance = null);
 
+public sealed record AgentSourceRequirements(
+    IReadOnlyCollection<string> AcceptedOutputTypes,
+    bool RequiresSource = false,
+    string? Guidance = null);
+
 public enum AgentExecutionMode
 {
     InlineFunction = 1,
@@ -24,4 +29,5 @@ public sealed record AgentDefinition(
     string DisplayName,
     string Description,
     AgentExecutionMode ExecutionMode,
-    AgentStartRequirements? StartRequirements = null);
+    AgentStartRequirements? StartRequirements = null,
+    AgentSourceRequirements? SourceRequirements = null);

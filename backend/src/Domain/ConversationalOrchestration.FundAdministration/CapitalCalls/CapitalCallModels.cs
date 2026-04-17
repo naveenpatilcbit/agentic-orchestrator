@@ -85,6 +85,7 @@ public sealed class TemplateOutputGenerationResult
 
 public sealed class CapitalCallOperationData
 {
+    public string? OutputId { get; set; }
     public string FundName { get; set; } = string.Empty;
     public CapitalCallRequestState? RequestState { get; set; }
     public CapitalCallExtractionReviewPayload? ReviewedExtraction { get; set; }
