@@ -164,8 +164,9 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         }
     }
 
-    // Finalizes the workflow output after review approval and deterministic allocation. Template
-    // rendering happens as a separate reusable operation.
+    // Finalizes the workflow output after review approval and deterministic allocation. The
+    // operation now tracks template rendering as the next current step, while the actual renderer
+    // can still stay reusable behind the scenes.
     private sealed class FinalizeApprovedCapitalCallExecutor : Executor<CapitalCallComputedWorkflowState, CapitalCallWorkflowCompleted>
     {
         public FinalizeApprovedCapitalCallExecutor()

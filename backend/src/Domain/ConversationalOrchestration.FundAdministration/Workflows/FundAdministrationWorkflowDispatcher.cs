@@ -596,10 +596,10 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             }
 
             operation.Status = AgentOperationStatus.Completed;
-            operation.CurrentStep = "ReviewedDataReady";
+            operation.CurrentStep = "TemplateRendering";
             operation.PendingClarification = null;
             operation.ActiveReviewTaskId = null;
-            operation.Summary = "Reviewed capital call allocations are approved and ready for a template output operation.";
+            operation.Summary = "Reviewed capital call allocations are approved. Template rendering is the current step.";
             // Keep the approved typed workflow output on the operation so downstream agents, like
             // template rendering, do not need to recompute or reinterpret the workflow result.
             operation.DataJson = JsonContent.Serialize(new CapitalCallOperationData
@@ -614,7 +614,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             await _operationRepository.UpsertAsync(operation, cancellationToken);
             await AddConversationUpdateAsync(
                 operation,
-                "Capital call review is complete. The approved allocation data is now ready for a reusable template output operation.",
+                "Capital call review is complete. The approved allocation data is ready, and template rendering is now the current step.",
                 cancellationToken);
         }
 

@@ -134,7 +134,7 @@ public sealed class NoticeCreationAgent : IAgent
                 BuildAudit(operation, "CapitalCallClarificationRequested", new { operation.PendingClarification })),
 
             AgentOperationStatus.Completed when data?.Notice is not null => new AgentExecutionResult(
-                $"I applied the reviewed partner data for {data.FundName} and calculated the final allocations. The approved data is now ready for a separate template output operation.",
+                $"I applied the reviewed partner data for {data.FundName} and calculated the final allocations. The approved data is ready, and template rendering is now the current step.",
                 operation,
                 BuildCompletedActions(operation, data),
                 BuildAudit(operation, "CapitalCallReviewedDataReady", data)),
