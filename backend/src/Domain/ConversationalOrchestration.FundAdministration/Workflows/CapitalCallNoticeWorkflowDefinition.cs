@@ -14,6 +14,7 @@ public static partial class FundAdministrationWorkflowNames
 public static class CapitalCallNoticeWorkflowPorts
 {
     public const string ExtractionReview = "capital-call-extraction-review";
+    public const string AllocationConfirmation = "capital-call-allocation-confirmation";
 }
 
 public sealed record CapitalCallWorkflowCompleted(
@@ -24,6 +25,8 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 {
     private static readonly RequestPort<CapitalCallExtractionReviewPayload, CapitalCallExtractionReviewPayload> ExtractionReviewPort =
         RequestPort.Create<CapitalCallExtractionReviewPayload, CapitalCallExtractionReviewPayload>(CapitalCallNoticeWorkflowPorts.ExtractionReview);
+    private static readonly RequestPort<CapitalCallWorkflowCompleted, CapitalCallWorkflowCompleted> AllocationConfirmationPort =
+        RequestPort.Create<CapitalCallWorkflowCompleted, CapitalCallWorkflowCompleted>(CapitalCallNoticeWorkflowPorts.AllocationConfirmation);
 
     private readonly IServiceScopeFactory _serviceScopeFactory;
 
@@ -40,21 +43,26 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
     {
         // Chat intake already collected fund name, amount, and source resolution before this workflow starts.
         // Inside the workflow we first build the extracted partner/feeder tree, pause for human review and edits,
-        // then run the deterministic allocation engine using the reviewed extraction payload.
+        // then run the deterministic allocation engine using the reviewed extraction payload and pause
+        // once more so the user can confirm the final allocation output before the workflow completes.
         var loadRequestState = new LoadRequestStateExecutor().BindExecutor();
         var buildExtractionReview = new BuildCapitalCallExtractionReviewExecutor(_serviceScopeFactory).BindExecutor();
         var extractionReview = ExtractionReviewPort.BindAsExecutor();
         var computeAllocations = new ComputeCapitalCallAllocationsExecutor(_serviceScopeFactory).BindExecutor();
         var finalizeReviewedAllocations = new FinalizeApprovedCapitalCallExecutor().BindExecutor();
+        var confirmFinalAllocations = AllocationConfirmationPort.BindAsExecutor();
+        var publishConfirmedAllocations = new PublishConfirmedCapitalCallExecutor().BindExecutor();
 
         return new WorkflowBuilder(loadRequestState)
             .WithName("Capital Call Notice")
-            .WithDescription("Builds extracted partner data, pauses for human review and edits, then computes approved capital call allocations for downstream template operations.")
+            .WithDescription("Builds extracted partner data, pauses for human review and edits, computes final capital call allocations, then asks for one last confirmation before downstream template operations.")
             .AddEdge(loadRequestState, buildExtractionReview, "load -> build review", idempotent: true)
             .AddEdge(buildExtractionReview, extractionReview, "build review -> human review", idempotent: true)
             .AddEdge(extractionReview, computeAllocations, "human review -> compute", idempotent: true)
             .AddEdge(computeAllocations, finalizeReviewedAllocations, "compute -> finalize", idempotent: true)
-            .WithOutputFrom(finalizeReviewedAllocations)
+            .AddEdge(finalizeReviewedAllocations, confirmFinalAllocations, "finalize -> confirm", idempotent: true)
+            .AddEdge(confirmFinalAllocations, publishConfirmedAllocations, "confirm -> publish", idempotent: true)
+            .WithOutputFrom(publishConfirmedAllocations)
             .Build(validateOrphans: true);
     }
 
@@ -66,6 +74,11 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
                 typeof(CapitalCallExtractionReviewPayload),
                 typeof(CapitalCallExtractionReviewPayload),
                 ExtractionReviewPort),
+            CapitalCallNoticeWorkflowPorts.AllocationConfirmation => new RequestPortDescriptor(
+                CapitalCallNoticeWorkflowPorts.AllocationConfirmation,
+                typeof(CapitalCallWorkflowCompleted),
+                typeof(CapitalCallWorkflowCompleted),
+                AllocationConfirmationPort),
             _ => throw new InvalidOperationException(
                 $"Workflow '{Name}' does not define request port '{portId}'. Capital call clarification currently happens before the workflow starts.")
         };
@@ -164,9 +177,8 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
         }
     }
 
-    // Finalizes the workflow output after review approval and deterministic allocation. The
-    // operation now tracks template rendering as the next current step, while the actual renderer
-    // can still stay reusable behind the scenes.
+    // Finalizes the workflow payload after review approval and deterministic allocation. A second
+    // confirmation step still happens after this so the user can inspect the computed result.
     private sealed class FinalizeApprovedCapitalCallExecutor : Executor<CapitalCallComputedWorkflowState, CapitalCallWorkflowCompleted>
     {
         public FinalizeApprovedCapitalCallExecutor()
@@ -181,6 +193,21 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
             => ValueTask.FromResult(new CapitalCallWorkflowCompleted(
                 input.ReviewPayload,
                 input.ComputationResult.Notice));
+    }
+
+    // Publishes the already-confirmed workflow payload as the final workflow output.
+    private sealed class PublishConfirmedCapitalCallExecutor : Executor<CapitalCallWorkflowCompleted, CapitalCallWorkflowCompleted>
+    {
+        public PublishConfirmedCapitalCallExecutor()
+            : base("publish_confirmed_allocations")
+        {
+        }
+
+        public override ValueTask<CapitalCallWorkflowCompleted> HandleAsync(
+            CapitalCallWorkflowCompleted input,
+            IWorkflowContext context,
+            CancellationToken cancellationToken)
+            => ValueTask.FromResult(input);
     }
 
     // Shared state after loading request data and before running the allocation engine.

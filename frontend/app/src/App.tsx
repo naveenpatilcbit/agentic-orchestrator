@@ -47,6 +47,19 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatCurrencyAmount(amount?: number, currency?: string) {
+  if (amount === undefined || amount === null) {
+    return currency ? `${currency} pending` : "Pending";
+  }
+
+  const formatted = amount.toLocaleString([], {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+  return currency ? `${currency} ${formatted}` : formatted;
+}
+
 function actionTone(type: string) {
   switch (type) {
     case "OpenPageWithPrefill":
@@ -80,9 +93,44 @@ type CapitalCallReviewPayload = {
   rootFund?: CapitalCallReviewFund;
 };
 
+type CapitalCallFundBreakdown = {
+  fundName?: string;
+  fundCurrency?: string;
+  amountToRaise?: number;
+  path?: string;
+};
+
+type CapitalCallLeafAllocation = {
+  investorName?: string;
+  currency?: string;
+  contributionAmount?: number;
+  parentFundPath?: string;
+};
+
+type CapitalCallNoticePayload = {
+  rootFundName?: string;
+  rootCurrency?: string;
+  rootCapitalCallAmount?: number;
+  fundBreakdowns?: CapitalCallFundBreakdown[];
+  leafAllocations?: CapitalCallLeafAllocation[];
+};
+
+type CapitalCallConfirmationPayload = {
+  reviewedExtraction?: CapitalCallReviewPayload;
+  notice?: CapitalCallNoticePayload;
+};
+
 function parseCapitalCallReviewPayload(rawJson: string): CapitalCallReviewPayload | null {
   try {
     return JSON.parse(rawJson) as CapitalCallReviewPayload;
+  } catch {
+    return null;
+  }
+}
+
+function parseCapitalCallConfirmationPayload(rawJson: string): CapitalCallConfirmationPayload | null {
+  try {
+    return JSON.parse(rawJson) as CapitalCallConfirmationPayload;
   } catch {
     return null;
   }
@@ -542,7 +590,7 @@ export default function App() {
                 />
               ))}
               {openReviewTasks.length === 0 ? (
-                <p className="muted">Editable capital call reviews and approve/reject onboarding checkpoints will appear here whenever a workflow pauses for human input.</p>
+                <p className="muted">Capital call extraction reviews, final allocation confirmations, and onboarding checkpoints will appear here whenever a workflow pauses for human input.</p>
               ) : null}
             </div>
           </section>
@@ -702,8 +750,14 @@ function ReviewCard({
   const capitalCallReviewPayload = task.taskType === "CapitalCallExtractionReview"
     ? parseCapitalCallReviewPayload(task.proposedPayloadJson)
     : null;
-  const capitalCallFund = capitalCallReviewPayload?.rootFund ?? null;
+  const capitalCallConfirmationPayload = task.taskType === "CapitalCallAllocationConfirmation"
+    ? parseCapitalCallConfirmationPayload(task.proposedPayloadJson)
+    : null;
+  const capitalCallPreviewSource = capitalCallReviewPayload ?? capitalCallConfirmationPayload?.reviewedExtraction ?? null;
+  const capitalCallFund = capitalCallPreviewSource?.rootFund ?? null;
+  const capitalCallNotice = capitalCallConfirmationPayload?.notice ?? null;
   const previewRows = buildCapitalCallPreviewRows(capitalCallFund).slice(0, 6);
+  const leafAllocationRows = capitalCallNotice?.leafAllocations?.slice(0, 6) ?? [];
   const primaryLabel = isEditable ? "Submit Reviewed Data" : "Approve";
   const originalNormalizedPayload = normalizeJson(task.finalPayloadJson ?? task.proposedPayloadJson);
   const draftNormalizedPayload = normalizeJson(draftPayload);
@@ -786,17 +840,39 @@ function ReviewCard({
           ))}
         </div>
       ) : null}
-      {capitalCallReviewPayload?.reviewDownloadRoute ? (
+      {capitalCallNotice ? (
+        <div className="review-preview">
+          <div className="review-preview-header">
+            <strong>{capitalCallNotice.rootFundName ?? "Capital Call Allocation Summary"}</strong>
+            <span>{capitalCallNotice.rootCurrency ?? "Currency pending"}</span>
+          </div>
+          <div className="review-preview-meta">
+            <span>{formatCurrencyAmount(capitalCallNotice.rootCapitalCallAmount, capitalCallNotice.rootCurrency)}</span>
+            <span>{capitalCallNotice.fundBreakdowns?.length ?? 0} fund breakdowns</span>
+            <span>{capitalCallNotice.leafAllocations?.length ?? 0} investor allocations</span>
+          </div>
+          {leafAllocationRows.map((allocation, index) => (
+            <div className="review-preview-row" key={`${allocation.investorName}-${index}`}>
+              <span>
+                {allocation.investorName ?? "Investor"}
+                {allocation.parentFundPath ? ` · ${allocation.parentFundPath}` : ""}
+              </span>
+              <strong>{formatCurrencyAmount(allocation.contributionAmount, allocation.currency)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {capitalCallPreviewSource?.reviewDownloadRoute ? (
         <button
           className="secondary-button review-download-button"
           type="button"
           onClick={() => {
             const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
-            window.open(new URL(capitalCallReviewPayload.reviewDownloadRoute!, baseUrl).toString(), "_blank", "noopener,noreferrer");
+            window.open(new URL(capitalCallPreviewSource.reviewDownloadRoute!, baseUrl).toString(), "_blank", "noopener,noreferrer");
           }}
         >
           Download Review Workbook
-          {capitalCallReviewPayload.reviewFileName ? `: ${capitalCallReviewPayload.reviewFileName}` : ""}
+          {capitalCallPreviewSource.reviewFileName ? `: ${capitalCallPreviewSource.reviewFileName}` : ""}
         </button>
       ) : null}
       {isEditable ? (
@@ -845,7 +921,7 @@ function ReviewCard({
           />
           {payloadError ? <p className="review-error">{payloadError}</p> : null}
         </>
-      ) : !isEditable ? (
+      ) : !isEditable && !capitalCallNotice ? (
         <pre>{task.proposedPayloadJson}</pre>
       ) : payloadError ? <p className="review-error">{payloadError}</p> : null}
     </article>

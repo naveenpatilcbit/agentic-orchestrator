@@ -16,7 +16,8 @@ public sealed class CapitalCallReviewContinuationHandler : IReviewContinuationHa
 
     public bool CanHandle(AgentOperation operation, ReviewTask reviewTask) =>
         operation.AgentId == FundAdministrationAgentIds.NoticeCreation &&
-        string.Equals(reviewTask.TaskType, "CapitalCallExtractionReview", StringComparison.Ordinal);
+        (string.Equals(reviewTask.TaskType, "CapitalCallExtractionReview", StringComparison.Ordinal) ||
+         string.Equals(reviewTask.TaskType, "CapitalCallAllocationConfirmation", StringComparison.Ordinal));
 
     public Task HandleApprovedAsync(
         ReviewContinuationContext context,
