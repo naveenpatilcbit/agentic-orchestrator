@@ -52,6 +52,36 @@ public sealed class ReviewTaskService : IReviewTaskService
         CancellationToken cancellationToken)
     {
         var result = await ApplyDecisionAsync(reviewTaskId, request, context, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(result.ConversationId) &&
+            !string.IsNullOrWhiteSpace(result.AssistantMessage))
+        {
+            // Review queue submissions do not flow through the chat orchestrator, so they need to
+            // append their own visible assistant acknowledgement after the review task closes.
+            await _conversationMessageRepository.AddAsync(
+                new ConversationMessage
+                {
+                    TenantId = context.TenantId,
+                    ConversationId = result.ConversationId,
+                    OperationId = result.OperationId,
+                    AuthorId = "system",
+                    Role = ConversationMessageRole.Assistant,
+                    Content = result.AssistantMessage,
+                    MessageKind = "review"
+                },
+                cancellationToken);
+
+            await _conversationHistoryCompactionService.RefreshAsync(
+                context.TenantId,
+                result.ConversationId,
+                cancellationToken);
+
+            _logger.LogInformation(
+                "Added assistant review acknowledgement for tenant {TenantId} conversation {ConversationId} operation {OperationId} after review submission.",
+                context.TenantId,
+                result.ConversationId,
+                result.OperationId);
+        }
+
         return result;
     }
 
