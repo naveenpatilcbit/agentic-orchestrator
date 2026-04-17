@@ -5,6 +5,7 @@ using ConversationalOrchestration.Domain.Auditing;
 using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -20,6 +21,7 @@ public sealed class ReviewTaskService : IReviewTaskService
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IReviewPayloadRevisionService _reviewPayloadRevisionService;
     private readonly IReadOnlyCollection<IReviewContinuationHandler> _reviewContinuationHandlers;
+    private readonly ILogger<ReviewTaskService> _logger;
 
     public ReviewTaskService(
         IReviewTaskRepository reviewTaskRepository,
@@ -29,7 +31,8 @@ public sealed class ReviewTaskService : IReviewTaskService
         IConversationHistoryCompactionService conversationHistoryCompactionService,
         IAuditEventRepository auditEventRepository,
         IReviewPayloadRevisionService reviewPayloadRevisionService,
-        IEnumerable<IReviewContinuationHandler> reviewContinuationHandlers)
+        IEnumerable<IReviewContinuationHandler> reviewContinuationHandlers,
+        ILogger<ReviewTaskService> logger)
     {
         _reviewTaskRepository = reviewTaskRepository;
         _operationRepository = operationRepository;
@@ -39,6 +42,7 @@ public sealed class ReviewTaskService : IReviewTaskService
         _auditEventRepository = auditEventRepository;
         _reviewPayloadRevisionService = reviewPayloadRevisionService;
         _reviewContinuationHandlers = reviewContinuationHandlers.ToArray();
+        _logger = logger;
     }
 
     public async Task<ChatInteractionResult> SubmitAsync(
@@ -105,10 +109,25 @@ public sealed class ReviewTaskService : IReviewTaskService
             ?? throw new InvalidOperationException("Operation not found.");
         var conversation = await _conversationRepository.GetAsync(reviewTask.ConversationId, context.TenantId, cancellationToken)
             ?? throw new InvalidOperationException("Conversation not found.");
+        _logger.LogInformation(
+            "Applying review decision for tenant {TenantId} conversation {ConversationId} operation {OperationId}. ReviewTaskId={ReviewTaskId} TaskType={TaskType} InteractionMode={InteractionMode} Action={Action} PendingRequestId={PendingRequestId}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            reviewTask.Id,
+            reviewTask.TaskType,
+            reviewTask.InteractionMode,
+            request.Action,
+            reviewTask.WorkflowPendingRequestId);
         var outcome = ResolveOutcome(reviewTask, request.Action);
         var payloadResolution = await ResolveFinalPayloadAsync(reviewTask, request, cancellationToken);
         if (!payloadResolution.Success)
         {
+            _logger.LogInformation(
+                "Review decision for tenant {TenantId} review task {ReviewTaskId} requires clarification before continuing. ClarificationPrompt={ClarificationPrompt}",
+                context.TenantId,
+                reviewTask.Id,
+                payloadResolution.ClarificationPrompt);
             return new ChatInteractionResult(
                 payloadResolution.ClarificationPrompt ?? "I couldn't apply those review changes yet.",
                 conversation.Id,
@@ -146,11 +165,55 @@ public sealed class ReviewTaskService : IReviewTaskService
             operation.PendingClarification = null;
 
             var handler = _reviewContinuationHandlers.FirstOrDefault(candidate => candidate.CanHandle(operation, reviewTask));
-            if (handler is not null)
+            if (handler is null)
             {
-                await handler.HandleApprovedAsync(
-                    new ReviewContinuationContext(conversation, operation, reviewTask, context),
-                    cancellationToken);
+                _logger.LogWarning(
+                    "Review decision wants to continue workflow but no continuation handler matched. Tenant={TenantId} ConversationId={ConversationId} OperationId={OperationId} AgentId={AgentId} ReviewTaskId={ReviewTaskId} TaskType={TaskType} WorkflowInstanceId={WorkflowInstanceId} CheckpointId={CheckpointId}",
+                    context.TenantId,
+                    conversation.Id,
+                    operation.Id,
+                    operation.AgentId,
+                    reviewTask.Id,
+                    reviewTask.TaskType,
+                    operation.WorkflowInstanceId,
+                    operation.LatestCheckpointId);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Review decision matched continuation handler {HandlerType}. Tenant={TenantId} ConversationId={ConversationId} OperationId={OperationId} ReviewTaskId={ReviewTaskId} WorkflowInstanceId={WorkflowInstanceId} CheckpointId={CheckpointId}",
+                    handler.GetType().Name,
+                    context.TenantId,
+                    conversation.Id,
+                    operation.Id,
+                    reviewTask.Id,
+                    operation.WorkflowInstanceId,
+                    operation.LatestCheckpointId);
+
+                try
+                {
+                    await handler.HandleApprovedAsync(
+                        new ReviewContinuationContext(conversation, operation, reviewTask, context),
+                        cancellationToken);
+                    _logger.LogInformation(
+                        "Review continuation handler {HandlerType} finished resume handoff for tenant {TenantId} operation {OperationId} reviewTask {ReviewTaskId}.",
+                        handler.GetType().Name,
+                        context.TenantId,
+                        operation.Id,
+                        reviewTask.Id);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        exception,
+                        "Review continuation handler {HandlerType} failed for tenant {TenantId} conversation {ConversationId} operation {OperationId} reviewTask {ReviewTaskId}.",
+                        handler.GetType().Name,
+                        context.TenantId,
+                        conversation.Id,
+                        operation.Id,
+                        reviewTask.Id);
+                    throw;
+                }
             }
         }
         else
@@ -160,6 +223,14 @@ public sealed class ReviewTaskService : IReviewTaskService
                 ? "ReviewNeedsChanges"
                 : "ReviewRejected";
             operation.PendingClarification = outcome.PendingClarification;
+            _logger.LogInformation(
+                "Review decision paused workflow for correction. Tenant={TenantId} ConversationId={ConversationId} OperationId={OperationId} ReviewTaskId={ReviewTaskId} ReviewStatus={ReviewStatus} CurrentStep={CurrentStep}",
+                context.TenantId,
+                conversation.Id,
+                operation.Id,
+                reviewTask.Id,
+                reviewTask.Status,
+                operation.CurrentStep);
         }
 
         reviewTask.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -222,6 +293,16 @@ public sealed class ReviewTaskService : IReviewTaskService
                 })
             },
             cancellationToken);
+
+        _logger.LogInformation(
+            "Review decision persisted for tenant {TenantId} conversation {ConversationId} operation {OperationId}. ReviewTaskId={ReviewTaskId} ReviewStatus={ReviewStatus} OperationStatus={OperationStatus} CurrentStep={CurrentStep}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            reviewTask.Id,
+            reviewTask.Status,
+            operation.Status,
+            operation.CurrentStep);
 
         return new ChatInteractionResult(
             outcome.ContinuesWorkflow

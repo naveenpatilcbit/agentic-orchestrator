@@ -193,6 +193,20 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             throw new InvalidOperationException($"No pending workflow request was found for review task '{reviewTaskId}'.");
         }
 
+        _logger.LogInformation(
+            "Capital call review resolved workflow pending request for tenant {TenantId} conversation {ConversationId} operation {OperationId}. ReviewTaskId={ReviewTaskId} PendingRequestId={PendingRequestId} PendingStatus={PendingStatus} PortId={PortId} RequestId={RequestId} RequestType={RequestType} WorkflowInstanceId={WorkflowInstanceId} CheckpointId={CheckpointId}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            reviewTaskId,
+            pendingRequest.Id,
+            pendingRequest.Status,
+            pendingRequest.PortId,
+            pendingRequest.RequestId,
+            pendingRequest.RequestType,
+            operation.WorkflowInstanceId,
+            operation.LatestCheckpointId);
+
         var result = await _workflowRuntimeService.ResumeAsync(
             new WorkflowResumeRequest(
                 context.TenantId,
@@ -201,6 +215,19 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 finalPayloadJson,
                 operation.LatestCheckpointId),
             cancellationToken);
+
+        _logger.LogInformation(
+            "Capital call review resume returned for tenant {TenantId} conversation {ConversationId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} WorkflowStatus={WorkflowStatus} CurrentStep={CurrentStep} CheckpointId={CheckpointId} PendingRequests={PendingRequestCount} Outputs={OutputCount} Error={Error}",
+            context.TenantId,
+            conversation.Id,
+            operation.Id,
+            result.Instance.Id,
+            result.Instance.Status,
+            result.Instance.CurrentStep,
+            result.Instance.LatestCheckpointId,
+            result.PendingRequests.Count,
+            result.Outputs.Count,
+            result.ErrorMessage);
 
         await ApplyCapitalCallWorkflowResultAsync(operation, result, context, cancellationToken);
     }
@@ -283,10 +310,48 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         var reviewTask = await _reviewTaskRepository.GetAsync(reviewTaskId, tenantId, cancellationToken);
         if (!string.IsNullOrWhiteSpace(reviewTask?.WorkflowPendingRequestId))
         {
-            return await _workflowPendingRequestRepository.GetAsync(reviewTask.WorkflowPendingRequestId, tenantId, cancellationToken);
+            var linkedPendingRequest = await _workflowPendingRequestRepository.GetAsync(reviewTask.WorkflowPendingRequestId, tenantId, cancellationToken);
+            if (linkedPendingRequest is not null)
+            {
+                _logger.LogInformation(
+                    "Resolved workflow pending request from review task link for tenant {TenantId} operation {OperationId}. ReviewTaskId={ReviewTaskId} PendingRequestId={PendingRequestId} PortId={PortId} Status={Status}",
+                    tenantId,
+                    operation.Id,
+                    reviewTaskId,
+                    linkedPendingRequest.Id,
+                    linkedPendingRequest.PortId,
+                    linkedPendingRequest.Status);
+                return linkedPendingRequest;
+            }
+
+            _logger.LogWarning(
+                "Review task {ReviewTaskId} referenced workflow pending request {PendingRequestId}, but that request was not found. Tenant={TenantId} OperationId={OperationId}",
+                reviewTaskId,
+                reviewTask.WorkflowPendingRequestId,
+                tenantId,
+                operation.Id);
         }
 
-        return await _workflowPendingRequestRepository.GetLatestOpenByOperationAsync(operation.Id, tenantId, cancellationToken);
+        var fallbackPendingRequest = await _workflowPendingRequestRepository.GetLatestOpenByOperationAsync(operation.Id, tenantId, cancellationToken);
+        if (fallbackPendingRequest is null)
+        {
+            _logger.LogWarning(
+                "No open workflow pending request was found while resolving review task {ReviewTaskId}. Tenant={TenantId} OperationId={OperationId}",
+                reviewTaskId,
+                tenantId,
+                operation.Id);
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Resolved workflow pending request from latest open operation request for tenant {TenantId} operation {OperationId}. ReviewTaskId={ReviewTaskId} PendingRequestId={PendingRequestId} PortId={PortId} Status={Status}",
+            tenantId,
+            operation.Id,
+            reviewTaskId,
+            fallbackPendingRequest.Id,
+            fallbackPendingRequest.PortId,
+            fallbackPendingRequest.Status);
+        return fallbackPendingRequest;
     }
 
     private async Task ApplyOnboardingWorkflowResultAsync(
@@ -424,6 +489,17 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         operation.WorkflowInstanceId = result.Instance.Id;
         operation.LatestCheckpointId = result.Instance.LatestCheckpointId;
         operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        _logger.LogInformation(
+            "Applying capital call workflow result for tenant {TenantId} operation {OperationId}. WorkflowInstanceId={WorkflowInstanceId} WorkflowStatus={WorkflowStatus} CurrentStep={CurrentStep} CheckpointId={CheckpointId} PendingRequests={PendingRequestCount} Outputs={OutputCount} Error={Error}",
+            context.TenantId,
+            operation.Id,
+            result.Instance.Id,
+            result.Instance.Status,
+            result.Instance.CurrentStep,
+            result.Instance.LatestCheckpointId,
+            result.PendingRequests.Count,
+            result.Outputs.Count,
+            result.ErrorMessage);
 
         if (!string.IsNullOrWhiteSpace(result.ErrorMessage) || result.Instance.Status == WorkflowInstanceStatus.Failed)
         {

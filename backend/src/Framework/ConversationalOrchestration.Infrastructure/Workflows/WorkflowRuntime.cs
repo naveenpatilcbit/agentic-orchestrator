@@ -117,20 +117,84 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         var checkpointId = request.CheckpointId ?? instance.LatestCheckpointId
             ?? throw new InvalidOperationException($"Workflow instance '{instance.Id}' does not have a checkpoint to resume.");
         pendingRequest.ResponsePayloadJson = request.ResponsePayloadJson;
+        _logger.LogInformation(
+            "Loaded workflow pending request {PendingRequestId} for resume. WorkflowInstanceId={WorkflowInstanceId} PortId={PortId} RequestId={RequestId} RequestType={RequestType} PendingStatus={PendingStatus} StoredCheckpointId={StoredCheckpointId} ResumeCheckpointId={ResumeCheckpointId} ResponsePayloadLength={ResponsePayloadLength}",
+            pendingRequest.Id,
+            instance.Id,
+            pendingRequest.PortId,
+            pendingRequest.RequestId,
+            pendingRequest.RequestType,
+            pendingRequest.Status,
+            instance.LatestCheckpointId,
+            checkpointId,
+            request.ResponsePayloadJson.Length);
 
         var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
         await using var run = await InProcessExecution.ResumeAsync(definition.Build(buildContext), checkpoint, _checkpointManager, cancellationToken);
 
         _ = run.NewEvents.ToArray();
-        var externalResponse = CreateExternalResponse(definition, pendingRequest);
-        await run.ResumeAsync([externalResponse], cancellationToken);
+        _logger.LogInformation(
+            "Creating external workflow response for workflow instance {WorkflowInstanceId}. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+            instance.Id,
+            pendingRequest.Id,
+            pendingRequest.PortId,
+            pendingRequest.RequestId);
+        ExternalResponse externalResponse;
+        try
+        {
+            externalResponse = CreateExternalResponse(definition, pendingRequest);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Failed to create external workflow response for workflow instance {WorkflowInstanceId}. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+                instance.Id,
+                pendingRequest.Id,
+                pendingRequest.PortId,
+                pendingRequest.RequestId);
+            throw;
+        }
+
+        _logger.LogInformation(
+            "Injecting external workflow response for workflow instance {WorkflowInstanceId}. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+            instance.Id,
+            pendingRequest.Id,
+            pendingRequest.PortId,
+            pendingRequest.RequestId);
+        try
+        {
+            await run.ResumeAsync([externalResponse], cancellationToken);
+            _logger.LogInformation(
+                "Workflow runtime accepted external response for workflow instance {WorkflowInstanceId}. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+                instance.Id,
+                pendingRequest.Id,
+                pendingRequest.PortId,
+                pendingRequest.RequestId);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Workflow runtime failed while resuming workflow instance {WorkflowInstanceId}. PendingRequestId={PendingRequestId} PortId={PortId} RequestId={RequestId}",
+                instance.Id,
+                pendingRequest.Id,
+                pendingRequest.PortId,
+                pendingRequest.RequestId);
+            throw;
+        }
 
         var resumedAtUtc = DateTimeOffset.UtcNow;
         pendingRequest.Status = WorkflowPendingRequestStatus.Responded;
         pendingRequest.RespondedAtUtc = resumedAtUtc;
         pendingRequest.UpdatedAtUtc = resumedAtUtc;
         await _workflowPendingRequestRepository.UpsertAsync(pendingRequest, cancellationToken);
+        _logger.LogInformation(
+            "Marked workflow pending request {PendingRequestId} as responded for workflow instance {WorkflowInstanceId}. RespondedAtUtc={RespondedAtUtc}",
+            pendingRequest.Id,
+            instance.Id,
+            resumedAtUtc);
 
         instance.Status = WorkflowInstanceStatus.Running;
         instance.CurrentStep = $"Resuming:{pendingRequest.PortId}";
