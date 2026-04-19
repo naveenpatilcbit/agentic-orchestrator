@@ -91,7 +91,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         - If an active operation exists and the user is answering its clarification, continuing its work, or referring to the current task, use ContinueOperation.
         - If an active operation exists and the user asks to start unrelated new work in the same thread, use AnswerDirectly and tell them to start a new thread or finish the current work first.
         - Completed outputs are reusable results from prior finished operations. Use them when the user asks to do the next step from prior approved work.
-        - If the user is starting a fresh request for an available capability, inspect that agent's startRequirements, the reducedConversationHistory, and the available attachments before deciding whether the request is ready to start.
+        - If the user is starting a fresh request for an available capability, inspect that agent's startRequirements and the available attachments before deciding whether the request is ready to start.
         - If the requested agent depends on a compatible completed output, inspect completedOutputs and the agent sourceRequirements.
         - When starting new work from a prior completed result, return StartNewOperation and set sourceOutputId when a specific completed output is clearly the best match.
         - Prefer a completed output from the last focused operation when the user says things like "this", "that", or "now do the next step".

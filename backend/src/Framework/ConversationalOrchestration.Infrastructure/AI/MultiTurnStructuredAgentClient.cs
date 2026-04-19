@@ -19,6 +19,8 @@ public sealed class MultiTurnStructuredAgentClient : IMultiTurnStructuredAgentCl
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    private static readonly Lazy<Func<AgentSession>> SessionFactory = new(CreateSessionFactory);
+
     private readonly ILlmChatClientFactory _chatClientFactory;
     private readonly MongoConversationChatHistoryProvider _chatHistoryProvider;
     private readonly ILoggerFactory _loggerFactory;
@@ -74,7 +76,7 @@ public sealed class MultiTurnStructuredAgentClient : IMultiTurnStructuredAgentCl
         //
         // Microsoft.Agents.AI 1.0.0 keeps AgentSession constructors non-public, so we have to
         // instantiate a concrete session via reflection.
-        var session = CreateSession();
+        var session = SessionFactory.Value();
         _chatHistoryProvider.BindSession(
             session,
             request.TenantId,
@@ -103,8 +105,10 @@ public sealed class MultiTurnStructuredAgentClient : IMultiTurnStructuredAgentCl
                 return null;
             }
 
-            // Most common: response.Value / response.Result / response.Output
-            var typed = TryExtractTypedResponse<TResponse>(response);
+            // Prefer TryGetResult(out T) if the response shape supports it; otherwise fall back
+            // to common property names.
+            var typed = TryExtractViaTryGetResult<TResponse>(response)
+                ?? TryExtractTypedResponse<TResponse>(response);
             if (typed is not null)
             {
                 return typed;
@@ -148,14 +152,48 @@ public sealed class MultiTurnStructuredAgentClient : IMultiTurnStructuredAgentCl
         return null;
     }
 
-    private static AgentSession CreateSession()
+    private static TResponse? TryExtractViaTryGetResult<TResponse>(object response)
+        where TResponse : class
     {
-        var session = Activator.CreateInstance(typeof(ChatClientAgentSession), nonPublic: true) as AgentSession;
-        if (session is null)
+        var method = response.GetType()
+            .GetMethods()
+            .FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, "TryGetResult", StringComparison.Ordinal) &&
+                candidate.GetParameters().Length == 1 &&
+                candidate.GetParameters()[0].IsOut);
+
+        if (method is null)
         {
-            throw new InvalidOperationException("Failed to create AgentSession for ChatClientAgent runs.");
+            return null;
         }
 
-        return session;
+        var args = new object?[] { null };
+        var ok = method.Invoke(response, args);
+        return ok is true ? args[0] as TResponse : null;
     }
+
+    private static Func<AgentSession> CreateSessionFactory()
+    {
+        var ctor = typeof(ChatClientAgentSession).GetConstructor(
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null);
+
+        if (ctor is null)
+        {
+            throw new InvalidOperationException("Failed to locate ChatClientAgentSession non-public constructor.");
+        }
+
+        return () =>
+        {
+            if (ctor.Invoke(null) is not AgentSession session)
+            {
+                throw new InvalidOperationException("Failed to create AgentSession for ChatClientAgent runs.");
+            }
+
+            return session;
+        };
+    }
+
 }

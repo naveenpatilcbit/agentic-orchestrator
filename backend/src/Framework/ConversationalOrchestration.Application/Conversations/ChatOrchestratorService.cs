@@ -233,7 +233,9 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             SourceOperationId = routingDecision.SourceOperationId,
             SourceOutputId = routingDecision.SourceOutputId
         };
-        // TODO: Understand the purpose of SOurceOPerationId
+        // If the router selected a prior completed output as the source for this request,
+        // persist it on the operation so the agent can load that lineage without re-parsing
+        // the user text.
         if (!string.IsNullOrWhiteSpace(routingDecision.SourceOperationId) ||
             !string.IsNullOrWhiteSpace(routingDecision.SourceOutputId))
         {
@@ -493,7 +495,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 deduplicationKey: $"agent-result:{userMessage.Id}:{result.Operation.Id}:status",
                 role: ConversationMessageRole.System);
         }
-        // TODO: Understand the prupose of audit events
+        // Audit events are persisted separately from the transcript so we can keep an
+        // immutable operational log for debugging and compliance without polluting chat.
         if (result.AuditEvents is not null)
         {
             foreach (var auditEvent in result.AuditEvents)
