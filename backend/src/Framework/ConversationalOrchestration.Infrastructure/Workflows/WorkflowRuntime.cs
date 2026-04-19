@@ -131,7 +131,9 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
         var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
-        await using var run = await InProcessExecution.ResumeAsync(definition.Build(buildContext), checkpoint, _checkpointManager, cancellationToken);
+        var workflow = definition.Build(buildContext) as Workflow
+            ?? throw new InvalidOperationException($"Workflow definition '{definition.Name}' did not return a Workflow instance.");
+        await using var run = await InProcessExecution.ResumeAsync(workflow, checkpoint, _checkpointManager, cancellationToken);
 
         _ = run.NewEvents.ToArray();
         _logger.LogInformation(
@@ -229,7 +231,9 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
 
         var buildContext = CreateBuildContext(instance);
         var checkpoint = new CheckpointInfo(instance.Id, checkpointId);
-        await using var run = await InProcessExecution.ResumeAsync(definition.Build(buildContext), checkpoint, _checkpointManager, cancellationToken);
+        var workflow = definition.Build(buildContext) as Workflow
+            ?? throw new InvalidOperationException($"Workflow definition '{definition.Name}' did not return a Workflow instance.");
+        await using var run = await InProcessExecution.ResumeAsync(workflow, checkpoint, _checkpointManager, cancellationToken);
         var processingResult = await ProcessRunAsync(definition, instance, run, cancellationToken);
         return await PersistRunAsync(instance, run, processingResult, cancellationToken);
     }
@@ -241,7 +245,9 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         CancellationToken cancellationToken)
         where TInput : notnull
     {
-        return await InProcessExecution.RunAsync(definition.Build(buildContext), input!, _checkpointManager, buildContext.WorkflowInstanceId, cancellationToken);
+        var workflow = definition.Build(buildContext) as Workflow
+            ?? throw new InvalidOperationException($"Workflow definition '{definition.Name}' did not return a Workflow instance.");
+        return await InProcessExecution.RunAsync(workflow, input!, _checkpointManager, buildContext.WorkflowInstanceId, cancellationToken);
     }
 
     private async Task<RunProcessingResult> ProcessRunAsync(
@@ -276,13 +282,13 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
                         var automaticResponse = await definition.TryCreateAutomaticResponseAsync(
                             requestInfoEvent,
                             cancellationToken);
-                        if (automaticResponse is not null)
+                        if (automaticResponse is ExternalResponse externalResponse)
                         {
                             _logger.LogInformation(
                                 "Workflow instance {WorkflowInstanceId} produced automatic response for port {PortId}.",
                                 instance.Id,
                                 requestInfoEvent.Request.PortInfo.PortId);
-                            automaticResponses.Add(automaticResponse);
+                            automaticResponses.Add(externalResponse);
                             break;
                         }
 
@@ -475,6 +481,11 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
         WorkflowPendingRequest pendingRequest)
     {
         var portDescriptor = definition.ResolveRequestPort(pendingRequest.PortId);
+        if (portDescriptor.Port is not RequestPort requestPort)
+        {
+            throw new InvalidOperationException(
+                $"Workflow definition '{definition.Name}' returned an invalid request port object for '{portDescriptor.PortId}'.");
+        }
         var requestPayload = DeserializeValue(pendingRequest.RequestPayloadJson, portDescriptor.RequestType);
         // Resume has to recreate the original request envelope before attaching the response;
         // this is how the workflow runtime binds the human reply back to the correct request port.
@@ -483,7 +494,7 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             var resumePayload = JsonSerializer.Deserialize<ExternalInputResumePayload>(
                 pendingRequest.ResponsePayloadJson ?? "{}",
                 _serializerOptions);
-            var resumableRequest = ExternalRequest.Create(portDescriptor.Port, requestPayload!, pendingRequest.RequestId);
+            var resumableRequest = ExternalRequest.Create(requestPort, requestPayload!, pendingRequest.RequestId);
             var response = new ExternalInputResponse(new ChatMessage(
                 ParseChatRole(resumePayload?.Role),
                 resumePayload?.MessageText ?? string.Empty));
@@ -494,7 +505,7 @@ public sealed class WorkflowRuntimeService : IWorkflowRuntimeService
             pendingRequest.ResponsePayloadJson ?? pendingRequest.RequestPayloadJson,
             portDescriptor.ResponseType);
 
-        var externalRequest = ExternalRequest.Create(portDescriptor.Port, requestPayload!, pendingRequest.RequestId);
+        var externalRequest = ExternalRequest.Create(requestPort, requestPayload!, pendingRequest.RequestId);
         return externalRequest.CreateResponse(responsePayload!);
     }
 

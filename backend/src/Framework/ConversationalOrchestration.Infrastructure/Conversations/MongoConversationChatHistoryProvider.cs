@@ -54,7 +54,7 @@ public sealed class MongoConversationChatHistoryProvider : ChatHistoryProvider
             return Array.Empty<ChatMessage>();
         }
 
-        return string.IsNullOrWhiteSpace(state.OperationId)
+        var reduced = string.IsNullOrWhiteSpace(state.OperationId)
             ? await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
                 state.TenantId,
                 state.ConversationId,
@@ -64,6 +64,8 @@ public sealed class MongoConversationChatHistoryProvider : ChatHistoryProvider
                 state.ConversationId,
                 state.OperationId,
                 cancellationToken);
+
+        return reduced.Select(MapChatMessage).ToArray();
     }
 
     protected override ValueTask StoreChatHistoryAsync(
@@ -91,5 +93,14 @@ public sealed class MongoConversationChatHistoryProvider : ChatHistoryProvider
         public string ConversationId { get; set; } = string.Empty;
         public string? OperationId { get; set; }
     }
-}
 
+    private static ChatMessage MapChatMessage(ReducedChatMessage message) =>
+        new(
+            message.Role switch
+            {
+                ReducedChatRole.Assistant => ChatRole.Assistant,
+                ReducedChatRole.System => ChatRole.System,
+                _ => ChatRole.User
+            },
+            message.Text);
+}

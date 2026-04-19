@@ -51,7 +51,7 @@ public sealed class FundOnboardingWorkflowDefinition : IWorkflowDefinition
 
     public Type StartInputType => typeof(FundOnboardingWorkflowStart);
 
-    public Workflow Build(WorkflowBuildContext buildContext)
+    public object Build(WorkflowBuildContext buildContext)
     {
         Func<FundOnboardingWorkflowStart, ClassificationReviewPayload> intakeHandler = input =>
             new(
@@ -111,10 +111,10 @@ public sealed class FundOnboardingWorkflowDefinition : IWorkflowDefinition
             _ => throw new InvalidOperationException($"Request port '{portId}' is not defined for workflow '{Name}'.")
         };
 
-    public Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
-        RequestInfoEvent requestInfoEvent,
+    public Task<object?> TryCreateAutomaticResponseAsync(
+        object requestInfoEvent,
         CancellationToken cancellationToken) =>
-        Task.FromResult<ExternalResponse?>(null);
+        Task.FromResult<object?>(null);
 
     private static string InferDocumentType(string fileName)
     {

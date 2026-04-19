@@ -7,9 +7,6 @@ using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.Application.Support;
-using Microsoft.Agents.AI;
-using Microsoft.Agents.AI.Workflows;
-using Microsoft.Extensions.AI;
 
 namespace ConversationalOrchestration.Application.Abstractions;
 
@@ -39,12 +36,12 @@ public interface IConversationHistoryCompactionService
         string conversationId,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyCollection<ChatMessage>> GetReducedConversationHistoryAsync(
+    Task<IReadOnlyCollection<ReducedChatMessage>> GetReducedConversationHistoryAsync(
         string tenantId,
         string conversationId,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyCollection<ChatMessage>> GetReducedOperationHistoryAsync(
+    Task<IReadOnlyCollection<ReducedChatMessage>> GetReducedOperationHistoryAsync(
         string tenantId,
         string conversationId,
         string operationId,
@@ -162,11 +159,6 @@ public interface IConversationRoutingAgent
         CancellationToken cancellationToken);
 }
 
-public interface ILlmChatClientFactory
-{
-    IChatClient? TryGetChatClient(LlmProfile profile);
-}
-
 /// <summary>
 /// Contract implemented by every agent capability in the platform.
 /// The chat orchestrator chooses which method to invoke based on the routing decision for the incoming message.
@@ -278,10 +270,10 @@ public interface IWorkflowDefinition
 {
     string Name { get; }
     Type StartInputType { get; }
-    Workflow Build(WorkflowBuildContext buildContext);
+    object Build(WorkflowBuildContext buildContext);
     RequestPortDescriptor ResolveRequestPort(string portId);
-    Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
-        RequestInfoEvent requestInfoEvent,
+    Task<object?> TryCreateAutomaticResponseAsync(
+        object requestInfoEvent,
         CancellationToken cancellationToken);
 }
 
@@ -316,7 +308,7 @@ public sealed record RequestPortDescriptor(
     string PortId,
     Type RequestType,
     Type ResponseType,
-    RequestPort Port);
+    object Port);
 
 public sealed record WorkflowStartRequest<TInput>(
     string TenantId,

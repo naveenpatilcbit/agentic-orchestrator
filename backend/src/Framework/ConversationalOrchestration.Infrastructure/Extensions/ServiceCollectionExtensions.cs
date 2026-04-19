@@ -42,7 +42,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<MicrosoftExtensionsAiStructuredLlmClient>();
         services.AddSingleton<IStructuredLlmClient>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
-        services.AddSingleton<ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
+        services.AddSingleton<ConversationalOrchestration.Infrastructure.AI.ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddScoped<IMultiTurnStructuredAgentClient, MultiTurnStructuredAgentClient>();
         services.AddScoped<IConversationRoutingAgent, LlmConversationRoutingAgent>();
         services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();

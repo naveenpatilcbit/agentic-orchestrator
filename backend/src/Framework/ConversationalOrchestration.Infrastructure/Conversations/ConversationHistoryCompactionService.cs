@@ -2,6 +2,7 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Application.Support;
 using ConversationalOrchestration.Domain.Conversations;
+using ConversationalOrchestration.Infrastructure.AI;
 using Microsoft.Extensions.AI;
 
 namespace ConversationalOrchestration.Infrastructure.Conversations;
@@ -66,7 +67,7 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
     }
 
-    public async Task<IReadOnlyCollection<ChatMessage>> GetReducedConversationHistoryAsync(
+    public async Task<IReadOnlyCollection<ReducedChatMessage>> GetReducedConversationHistoryAsync(
         string tenantId,
         string conversationId,
         CancellationToken cancellationToken)
@@ -74,13 +75,13 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         var conversation = await _conversationRepository.GetAsync(conversationId, tenantId, cancellationToken);
         if (conversation is null)
         {
-            return Array.Empty<ChatMessage>();
+            return Array.Empty<ReducedChatMessage>();
         }
 
         var storedMessages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
         if (storedMessages.Count == 0)
         {
-            return Array.Empty<ChatMessage>();
+            return Array.Empty<ReducedChatMessage>();
         }
 
         var messages = storedMessages.Select(MapChatMessage).ToArray();
@@ -105,10 +106,10 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         conversation.ReducedHistoryUpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
 
-        return reducedMessages;
+        return reducedMessages.Select(MapReducedChatMessage).ToArray();
     }
 
-    public async Task<IReadOnlyCollection<ChatMessage>> GetReducedOperationHistoryAsync(
+    public async Task<IReadOnlyCollection<ReducedChatMessage>> GetReducedOperationHistoryAsync(
         string tenantId,
         string conversationId,
         string operationId,
@@ -117,23 +118,24 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         var conversation = await _conversationRepository.GetAsync(conversationId, tenantId, cancellationToken);
         if (conversation is null)
         {
-            return Array.Empty<ChatMessage>();
+            return Array.Empty<ReducedChatMessage>();
         }
 
         var storedMessages = await _conversationMessageRepository.ListHistoryAsync(conversationId, tenantId, operationId, cancellationToken);
         if (storedMessages.Count == 0)
         {
-            return Array.Empty<ChatMessage>();
+            return Array.Empty<ReducedChatMessage>();
         }
 
         var operationMessages = storedMessages.Select(MapChatMessage).ToArray();
         // Operation-scoped compaction keeps slot-filling and clarification prompts focused on one
         // unit of work even when the parent conversation contains multiple operations.
-        return await ReduceMessagesAsync(
+        var reduced = await ReduceMessagesAsync(
             operationMessages,
             OperationTargetMessageCount,
             OperationThresholdMessageCount,
             cancellationToken);
+        return reduced.Select(MapReducedChatMessage).ToArray();
     }
 
     private async Task<IReadOnlyCollection<ChatMessage>> ReduceMessagesAsync(
@@ -173,23 +175,21 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
     private static bool ShouldPersistReducedHistory(int originalCount, int reducedCount) =>
         reducedCount > 0 && reducedCount < originalCount;
 
-    private static IReadOnlyCollection<ChatMessage> LoadStoredMessages(string reducedHistoryJson) =>
+    private static IReadOnlyCollection<ReducedChatMessage> LoadStoredMessages(string reducedHistoryJson) =>
         (JsonContent.Deserialize<IReadOnlyCollection<StoredChatMessage>>(reducedHistoryJson) ?? Array.Empty<StoredChatMessage>())
-        .Select(MapChatMessage)
+        .Select(message => new ReducedChatMessage(ParseReducedRole(message.Role), message.Text))
         .ToArray();
 
     private static StoredChatMessage MapStoredMessage(ChatMessage message) =>
         new(message.Role.Value, message.Text);
 
-    private static ChatMessage MapChatMessage(StoredChatMessage message) =>
-        new(
-            message.Role switch
-            {
-                nameof(ChatRole.Assistant) or "assistant" => ChatRole.Assistant,
-                nameof(ChatRole.System) or "system" => ChatRole.System,
-                _ => ChatRole.User
-            },
-            message.Text);
+    private static ReducedChatRole ParseReducedRole(string role) =>
+        role switch
+        {
+            nameof(ChatRole.Assistant) or "assistant" => ReducedChatRole.Assistant,
+            nameof(ChatRole.System) or "system" => ReducedChatRole.System,
+            _ => ReducedChatRole.User
+        };
 
     private static ChatMessage MapChatMessage(ConversationMessage message) =>
         new(
@@ -200,6 +200,16 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
                 _ => ChatRole.User
             },
             message.Content);
+
+    private static ReducedChatMessage MapReducedChatMessage(ChatMessage message) =>
+        new(
+            message.Role.Value switch
+            {
+                "assistant" => ReducedChatRole.Assistant,
+                "system" => ReducedChatRole.System,
+                _ => ReducedChatRole.User
+            },
+            message.Text);
 
     private sealed record StoredChatMessage(string Role, string Text);
 }

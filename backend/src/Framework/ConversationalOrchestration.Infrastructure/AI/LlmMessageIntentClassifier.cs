@@ -55,8 +55,7 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
                     availableAgents),
                 AgentId: "routing-agent",
                 AgentName: "Routing agent",
-                AgentDescription: "Classifies user messages into orchestration routing decisions.",
-                ChatOptions: null),
+                AgentDescription: "Classifies user messages into orchestration routing decisions."),
             cancellationToken);
 
         if (decision is null || string.IsNullOrWhiteSpace(decision.DecisionType))

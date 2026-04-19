@@ -1,5 +1,3 @@
-using Microsoft.Extensions.AI;
-
 namespace ConversationalOrchestration.Application.Abstractions;
 
 /// <summary>
@@ -24,6 +22,4 @@ public sealed record MultiTurnStructuredAgentRequest(
     string UserPrompt,
     string AgentId,
     string AgentName,
-    string? AgentDescription = null,
-    ChatOptions? ChatOptions = null);
-
+    string? AgentDescription = null);

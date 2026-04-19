@@ -1,7 +1,6 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
 using Microsoft.Agents.AI.Workflows;
-using Microsoft.Agents.AI.Workflows.Declarative.Events;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
@@ -39,7 +38,7 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
 
     public Type StartInputType => typeof(CapitalCallWorkflowStart);
 
-    public Workflow Build(WorkflowBuildContext buildContext)
+    public object Build(WorkflowBuildContext buildContext)
     {
         // Chat intake already collected fund name, amount, and source resolution before this workflow starts.
         // Inside the workflow we first build the extracted partner/feeder tree, pause for human review and edits,
@@ -83,10 +82,10 @@ public sealed class CapitalCallNoticeWorkflowDefinition : IWorkflowDefinition
                 $"Workflow '{Name}' does not define request port '{portId}'. Capital call clarification currently happens before the workflow starts.")
         };
 
-    public Task<ExternalResponse?> TryCreateAutomaticResponseAsync(
-        RequestInfoEvent requestInfoEvent,
+    public Task<object?> TryCreateAutomaticResponseAsync(
+        object requestInfoEvent,
         CancellationToken cancellationToken) =>
-        Task.FromResult<ExternalResponse?>(null);
+        Task.FromResult<object?>(null);
 
     // Normalizes the strongly typed workflow start payload into the compact state object used by
     // the rest of the graph. By the time the workflow starts, chat intake has already resolved the

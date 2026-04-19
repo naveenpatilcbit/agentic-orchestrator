@@ -61,7 +61,6 @@ public sealed class MultiTurnStructuredAgentClient : IMultiTurnStructuredAgentCl
             Id = request.AgentId,
             Name = request.AgentName,
             Description = request.AgentDescription,
-            ChatOptions = request.ChatOptions,
             ChatHistoryProvider = _chatHistoryProvider
         };
 
