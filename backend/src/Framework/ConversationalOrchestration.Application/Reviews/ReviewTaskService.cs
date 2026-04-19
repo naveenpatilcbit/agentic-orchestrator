@@ -1,4 +1,5 @@
 using ConversationalOrchestration.Application.Abstractions;
+using ConversationalOrchestration.Application.Conversations;
 using ConversationalOrchestration.Application.Support;
 using ConversationalOrchestration.Contracts;
 using ConversationalOrchestration.Domain.Auditing;
@@ -16,8 +17,7 @@ public sealed class ReviewTaskService : IReviewTaskService
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAgentOperationRepository _operationRepository;
     private readonly IConversationRepository _conversationRepository;
-    private readonly IConversationMessageRepository _conversationMessageRepository;
-    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
+    private readonly IConversationTranscriptService _conversationTranscriptService;
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IReviewPayloadRevisionService _reviewPayloadRevisionService;
     private readonly IReadOnlyCollection<IReviewContinuationHandler> _reviewContinuationHandlers;
@@ -27,8 +27,7 @@ public sealed class ReviewTaskService : IReviewTaskService
         IReviewTaskRepository reviewTaskRepository,
         IAgentOperationRepository operationRepository,
         IConversationRepository conversationRepository,
-        IConversationMessageRepository conversationMessageRepository,
-        IConversationHistoryCompactionService conversationHistoryCompactionService,
+        IConversationTranscriptService conversationTranscriptService,
         IAuditEventRepository auditEventRepository,
         IReviewPayloadRevisionService reviewPayloadRevisionService,
         IEnumerable<IReviewContinuationHandler> reviewContinuationHandlers,
@@ -37,8 +36,7 @@ public sealed class ReviewTaskService : IReviewTaskService
         _reviewTaskRepository = reviewTaskRepository;
         _operationRepository = operationRepository;
         _conversationRepository = conversationRepository;
-        _conversationMessageRepository = conversationMessageRepository;
-        _conversationHistoryCompactionService = conversationHistoryCompactionService;
+        _conversationTranscriptService = conversationTranscriptService;
         _auditEventRepository = auditEventRepository;
         _reviewPayloadRevisionService = reviewPayloadRevisionService;
         _reviewContinuationHandlers = reviewContinuationHandlers.ToArray();
@@ -55,24 +53,18 @@ public sealed class ReviewTaskService : IReviewTaskService
         if (!string.IsNullOrWhiteSpace(result.ConversationId) &&
             !string.IsNullOrWhiteSpace(result.AssistantMessage))
         {
-            // Review queue submissions do not flow through the chat orchestrator, so they need to
-            // append their own visible assistant acknowledgement after the review task closes.
-            await _conversationMessageRepository.AddAsync(
-                new ConversationMessage
-                {
-                    TenantId = context.TenantId,
-                    ConversationId = result.ConversationId,
-                    OperationId = result.OperationId,
-                    AuthorId = "system",
-                    Role = ConversationMessageRole.Assistant,
-                    Content = result.AssistantMessage,
-                    MessageKind = "review"
-                },
-                cancellationToken);
-
-            await _conversationHistoryCompactionService.RefreshAsync(
-                context.TenantId,
-                result.ConversationId,
+            await _conversationTranscriptService.AppendAsync(
+                new ConversationTranscriptAppendRequest(
+                    context.TenantId,
+                    result.ConversationId,
+                    "review-queue",
+                    ConversationMessageRole.Assistant,
+                    result.AssistantMessage,
+                    "review",
+                    OperationId: result.OperationId,
+                    SourceType: "review-decision",
+                    SourceMessageId: reviewTaskId,
+                    DeduplicationKey: $"review-submit:{reviewTaskId}:{request.ClientRequestId ?? Guid.NewGuid().ToString("N")}"),
                 cancellationToken);
 
             _logger.LogInformation(
@@ -272,49 +264,29 @@ public sealed class ReviewTaskService : IReviewTaskService
         operation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
         await _operationRepository.UpsertAsync(operation, cancellationToken);
+        if (ConversationSessionStateResolver.SyncConversationPointers(
+                conversation,
+                ConversationSessionStateResolver.IsActiveOperation(operation) ? operation : null))
+        {
+            conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await _conversationRepository.UpsertAsync(conversation, cancellationToken);
+        }
 
         var echoReviewComment = ShouldEchoCommentToConversation(request);
         if (echoReviewComment)
         {
-            await _conversationMessageRepository.AddAsync(
-                new ConversationMessage
-                {
-                    TenantId = context.TenantId,
-                    ConversationId = conversation.Id,
-                    OperationId = operation.Id,
-                    AuthorId = context.UserId,
-                    Role = ConversationMessageRole.User,
-                    Content = request.ChangeRequestText!,
-                    MessageKind = "review-comment"
-                },
-                cancellationToken);
-        }
-
-        var conversationUpdated = echoReviewComment;
-        if (!UsesWorkflowDrivenReviewMessaging(reviewTask))
-        {
-            await _conversationMessageRepository.AddAsync(
-                new ConversationMessage
-                {
-                    TenantId = context.TenantId,
-                    ConversationId = conversation.Id,
-                    OperationId = operation.Id,
-                    AuthorId = "system",
-                    Role = ConversationMessageRole.System,
-                    Content = outcome.ContinuesWorkflow
-                        ? $"{reviewTask.Title} {outcome.ActionLabel}. Resuming {operation.Title}."
-                        : $"{reviewTask.Title} {outcome.ActionLabel}. {operation.Title} is paused until the data is corrected.",
-                    MessageKind = "review"
-                },
-                cancellationToken);
-            conversationUpdated = true;
-        }
-
-        if (conversationUpdated)
-        {
-            await _conversationHistoryCompactionService.RefreshAsync(
-                context.TenantId,
-                conversation.Id,
+            await _conversationTranscriptService.AppendAsync(
+                new ConversationTranscriptAppendRequest(
+                    context.TenantId,
+                    conversation.Id,
+                    context.UserId,
+                    ConversationMessageRole.User,
+                    request.ChangeRequestText!,
+                    "review-comment",
+                    OperationId: operation.Id,
+                    SourceType: "review-comment",
+                    SourceMessageId: reviewTask.Id,
+                    DeduplicationKey: $"review-comment:{reviewTask.Id}:{request.ClientRequestId ?? Guid.NewGuid().ToString("N")}"),
                 cancellationToken);
         }
 

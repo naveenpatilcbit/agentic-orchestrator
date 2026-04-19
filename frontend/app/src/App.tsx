@@ -248,7 +248,7 @@ export default function App() {
     let isMounted = true;
 
     const refresh = async () => {
-      const [conversationResult, historyResult] = await Promise.allSettled([
+      const [snapshotResult, historyResult] = await Promise.allSettled([
         conversationId ? getConversation(conversationId) : Promise.resolve(null),
         listConversations(),
       ]);
@@ -257,10 +257,10 @@ export default function App() {
         return;
       }
 
-      if (conversationResult.status === "fulfilled") {
-        setSnapshot(conversationResult.value);
-      } else {
-        setSnapshot(null);
+      if (snapshotResult.status === "fulfilled") {
+        if (snapshotResult.value) {
+          setSnapshot(snapshotResult.value);
+        }
       }
 
       if (historyResult.status === "fulfilled") {
@@ -297,10 +297,19 @@ export default function App() {
     [snapshot],
   );
 
+  const activeOperation = activeOperations[0] ?? null;
+
   const openReviewTasks = useMemo(
-    () => snapshot?.reviewTasks.filter((task) => task.status === "Open") ?? [],
-    [snapshot],
+    () =>
+      snapshot?.reviewTasks.filter(
+        (task) =>
+          task.status === "Open" &&
+          (!activeOperation || task.operationId === activeOperation.id),
+      ) ?? [],
+    [activeOperation, snapshot],
   );
+
+  const activeReviewTask = openReviewTasks[0] ?? null;
 
   const uploadedInputFiles = useMemo(
     () =>
@@ -325,6 +334,10 @@ export default function App() {
         conversationId,
         message: inputMessage,
         attachmentIds: uploadQueue.map((file) => file.id),
+        clientMessageId:
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       });
 
       setSnapshot(data);
@@ -382,9 +395,16 @@ export default function App() {
       const updated = await submitReviewDecision(
         task.id,
         action,
-        options,
+        {
+          ...options,
+          clientRequestId:
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        },
       );
       setSnapshot(updated);
+      await refreshConversationHistory();
     } catch (decisionError) {
       setError(
         decisionError instanceof Error ? decisionError.message : "Unable to submit review decision",
@@ -399,20 +419,41 @@ export default function App() {
       return;
     }
 
-    setConversationId(nextConversationId);
-    setSnapshot(null);
-    setUploadQueue([]);
-    setMessage("");
-    setError(null);
+    void (async () => {
+      setIsBusy(true);
+      setError(null);
+      try {
+        const data = await getConversation(nextConversationId);
+        setConversationId(data.conversationId);
+        setSnapshot(data);
+        setUploadQueue([]);
+        setMessage("");
+        await refreshConversationHistory();
+      } catch (openError) {
+        setError(openError instanceof Error ? openError.message : "Unable to open thread");
+      } finally {
+        setIsBusy(false);
+      }
+    })();
   }
 
   function resetConversation() {
-    localStorage.removeItem("conversational-orchestration-conversation");
-    setConversationId(null);
-    setSnapshot(null);
-    setMessage("");
-    setUploadQueue([]);
-    setError(null);
+    void (async () => {
+      setIsBusy(true);
+      setError(null);
+      try {
+        localStorage.removeItem("conversational-orchestration-conversation");
+        setConversationId(null);
+        setSnapshot(null);
+        setMessage("");
+        setUploadQueue([]);
+        await refreshConversationHistory();
+      } catch (resetError) {
+        setError(resetError instanceof Error ? resetError.message : "Unable to clear active thread");
+      } finally {
+        setIsBusy(false);
+      }
+    })();
   }
 
   return (
@@ -425,8 +466,8 @@ export default function App() {
 
         <div className="hero-metrics">
           <MetricCard label="Conversation" value={snapshot?.title ?? "Fresh thread"} />
-          <MetricCard label="Active work" value={String(activeOperations.length)} />
-          <MetricCard label="Open reviews" value={String(openReviewTasks.length)} />
+          <MetricCard label="Active work" value={String(activeOperation ? 1 : 0)} />
+          <MetricCard label="Open reviews" value={String(activeReviewTask ? 1 : 0)} />
         </div>
       </header>
 
@@ -463,18 +504,17 @@ export default function App() {
               ) : conversationHistory.length ? (
                 conversationHistory.map((thread) => (
                   <button
-                    key={thread.conversationId}
-                    type="button"
-                    className={`thread-card ${thread.conversationId === conversationId ? "active" : ""}`}
-                    onClick={() => handleOpenConversation(thread.conversationId)}
-                  >
+                      key={thread.conversationId}
+                      type="button"
+                      className={`thread-card ${thread.conversationId === conversationId ? "active" : ""}`}
+                      onClick={() => handleOpenConversation(thread.conversationId)}
+                    >
                     <div className="thread-card-topline">
                       <strong>{thread.title}</strong>
-                      {thread.conversationId === conversationId ? <span className="thread-badge">Live</span> : null}
                     </div>
                     <div className="thread-card-meta">
                       <span>{thread.messageCount} msgs</span>
-                      <span>{thread.activeOperationCount} active</span>
+                      <span>{thread.activeOperationCount ? "workflow active" : "idle"}</span>
                       <span>{thread.openReviewCount} reviews</span>
                     </div>
                     <span className="thread-card-time">{formatThreadTime(thread.updatedAtUtc)}</span>
@@ -493,8 +533,8 @@ export default function App() {
             <div>
               <h2>Conversation Thread</h2>
               <p className="subtle">
-                Same chat, many operations. Routing will continue an existing workflow only when the
-                message is clearly attached to it.
+                One active workflow lives in a thread at a time. Start a new thread whenever you
+                want separate work.
               </p>
             </div>
             <span className="conversation-id">{conversationId ? `#${conversationId.slice(0, 8)}` : "new"}</span>
@@ -575,40 +615,41 @@ export default function App() {
         <aside className="panel review-panel">
           <section className="panel-section">
             <div className="panel-heading">
-              <h2>Review Queue</h2>
-              <span>{openReviewTasks.length}</span>
+              <h2>Current Review</h2>
+              <span>{activeReviewTask ? 1 : 0}</span>
             </div>
             <div className="stack">
               {openReviewTasks.map((task) => (
-                <ReviewCard
-                  key={task.id}
-                  task={task}
-                  operations={snapshot?.operations ?? []}
-                  onSubmit={(action, options) => {
-                    void handleDecision(task, action, options);
-                  }}
-                />
+                activeReviewTask && task.id === activeReviewTask.id ? (
+                  <ReviewCard
+                    key={task.id}
+                    task={task}
+                    operations={snapshot?.operations ?? []}
+                    onSubmit={(action, options) => {
+                      void handleDecision(task, action, options);
+                    }}
+                  />
+                ) : null
               ))}
               {openReviewTasks.length === 0 ? (
-                <p className="muted">Capital call extraction reviews, final allocation confirmations, and onboarding checkpoints will appear here whenever a workflow pauses for human input.</p>
+                <p className="muted">The current workflow review step will appear here whenever the session pauses for human input.</p>
               ) : null}
             </div>
           </section>
 
           <section className="panel-section">
             <div className="panel-heading">
-              <h2>Active Work</h2>
-              <span>{activeOperations.length}</span>
+              <h2>Current Work</h2>
+              <span>{activeOperation ? 1 : 0}</span>
             </div>
             <div className="stack">
-              {activeOperations.map((operation) => (
-                <OperationCard key={operation.id} operation={operation} />
-              ))}
-              {activeOperations.length === 0 ? (
+              {activeOperation ? (
+                <OperationCard operation={activeOperation} />
+              ) : (
                 <p className="muted">
-                  No running work yet. Start a capital call or onboarding flow to see active operations and review checkpoints show up side by side.
+                  No running work yet. Start a workflow in this thread to see its live status and review checkpoint here.
                 </p>
-              ) : null}
+              )}
             </div>
           </section>
 

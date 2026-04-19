@@ -13,6 +13,7 @@ public sealed class ConversationThread
     public string TenantId { get; set; } = string.Empty;
     public string Title { get; set; } = "New conversation";
     public string? LastFocusedOperationId { get; set; }
+    public string? ActiveOperationId { get; set; }
     public string? ReducedHistoryJson { get; set; }
     public int ReducedHistorySourceCount { get; set; }
     public DateTimeOffset? ReducedHistoryUpdatedAtUtc { get; set; }
@@ -31,5 +32,9 @@ public sealed class ConversationMessage
     public string Content { get; set; } = string.Empty;
     public string MessageKind { get; set; } = "chat";
     public string? ActionsJson { get; set; }
+    public string? DeduplicationKey { get; set; }
+    public string? SourceType { get; set; }
+    public string? SourceMessageId { get; set; }
+    public string? MetadataJson { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

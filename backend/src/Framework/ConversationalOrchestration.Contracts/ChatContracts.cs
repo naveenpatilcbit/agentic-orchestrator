@@ -3,7 +3,8 @@ namespace ConversationalOrchestration.Contracts;
 public sealed record ChatMessageRequest(
     string? ConversationId,
     string Message,
-    IReadOnlyCollection<string>? AttachmentIds);
+    IReadOnlyCollection<string>? AttachmentIds,
+    string? ClientMessageId = null);
 
 public sealed record ConversationSnapshotResponse(
     string ConversationId,
@@ -74,4 +75,5 @@ public sealed record ReviewDecisionRequest(
     string Action,
     string? FinalPayloadJson,
     string? ChangeRequestText,
-    string? Notes);
+    string? Notes,
+    string? ClientRequestId = null);

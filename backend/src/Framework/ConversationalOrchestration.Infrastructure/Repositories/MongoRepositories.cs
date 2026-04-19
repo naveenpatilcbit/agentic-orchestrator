@@ -58,6 +58,25 @@ public sealed class ConversationMessageRepository : IConversationMessageReposito
         await _collections.Messages.Find(item => item.ConversationId == conversationId && item.TenantId == tenantId)
             .SortBy(item => item.CreatedAtUtc)
             .ToListAsync(cancellationToken);
+
+    public async Task<IReadOnlyCollection<ConversationMessage>> ListHistoryAsync(
+        string conversationId,
+        string tenantId,
+        string? operationId,
+        CancellationToken cancellationToken)
+    {
+        var filter = Builders<ConversationMessage>.Filter.Eq(item => item.ConversationId, conversationId)
+                     & Builders<ConversationMessage>.Filter.Eq(item => item.TenantId, tenantId);
+
+        if (!string.IsNullOrWhiteSpace(operationId))
+        {
+            filter &= Builders<ConversationMessage>.Filter.Eq(item => item.OperationId, operationId);
+        }
+
+        return await _collections.Messages.Find(filter)
+            .SortBy(item => item.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
+    }
 }
 
 public sealed class AgentOperationRepository : IAgentOperationRepository

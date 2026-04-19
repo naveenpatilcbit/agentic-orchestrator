@@ -38,8 +38,8 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             return;
         }
 
-        var messages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
-        if (messages.Count == 0)
+        var storedMessages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
+        if (storedMessages.Count == 0)
         {
             conversation.ReducedHistoryJson = null;
             conversation.ReducedHistorySourceCount = 0;
@@ -50,18 +50,18 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
 
         // Persist the latest reduced transcript so other callers can reuse it without re-running
         // compaction every time they need conversation context for LLM prompts.
+        var messages = storedMessages.Select(MapChatMessage).ToArray();
         var reducedMessages = await ReduceMessagesAsync(
             messages,
             ConversationTargetMessageCount,
             ConversationThresholdMessageCount,
             cancellationToken);
 
-        conversation.ReducedHistoryJson = ShouldPersistReducedHistory(messages.Count, reducedMessages.Count)
+        conversation.ReducedHistoryJson = ShouldPersistReducedHistory(messages.Length, reducedMessages.Count)
             ? JsonContent.Serialize(reducedMessages.Select(MapStoredMessage).ToArray())
             : null;
-        conversation.ReducedHistorySourceCount = messages.Count;
+        conversation.ReducedHistorySourceCount = messages.Length;
         conversation.ReducedHistoryUpdatedAtUtc = DateTimeOffset.UtcNow;
-        conversation.UpdatedAtUtc = Max(conversation.UpdatedAtUtc, messages.Max(message => message.CreatedAtUtc));
 
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
     }
@@ -77,14 +77,15 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             return Array.Empty<ChatMessage>();
         }
 
-        var messages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
-        if (messages.Count == 0)
+        var storedMessages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
+        if (storedMessages.Count == 0)
         {
             return Array.Empty<ChatMessage>();
         }
 
+        var messages = storedMessages.Select(MapChatMessage).ToArray();
         if (!string.IsNullOrWhiteSpace(conversation.ReducedHistoryJson) &&
-            conversation.ReducedHistorySourceCount == messages.Count)
+            conversation.ReducedHistorySourceCount == messages.Length)
         {
             // The reduced snapshot is keyed by source message count, so it is safe to reuse until
             // a new raw message lands in the conversation.
@@ -97,12 +98,11 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
             ConversationThresholdMessageCount,
             cancellationToken);
 
-        conversation.ReducedHistoryJson = ShouldPersistReducedHistory(messages.Count, reducedMessages.Count)
+        conversation.ReducedHistoryJson = ShouldPersistReducedHistory(messages.Length, reducedMessages.Count)
             ? JsonContent.Serialize(reducedMessages.Select(MapStoredMessage).ToArray())
             : null;
-        conversation.ReducedHistorySourceCount = messages.Count;
+        conversation.ReducedHistorySourceCount = messages.Length;
         conversation.ReducedHistoryUpdatedAtUtc = DateTimeOffset.UtcNow;
-        conversation.UpdatedAtUtc = Max(conversation.UpdatedAtUtc, messages.Max(message => message.CreatedAtUtc));
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
 
         return reducedMessages;
@@ -114,16 +114,19 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
         string operationId,
         CancellationToken cancellationToken)
     {
-        var messages = await _conversationMessageRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
-        var operationMessages = messages
-            .Where(message => string.Equals(message.OperationId, operationId, StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-
-        if (operationMessages.Length == 0)
+        var conversation = await _conversationRepository.GetAsync(conversationId, tenantId, cancellationToken);
+        if (conversation is null)
         {
             return Array.Empty<ChatMessage>();
         }
 
+        var storedMessages = await _conversationMessageRepository.ListHistoryAsync(conversationId, tenantId, operationId, cancellationToken);
+        if (storedMessages.Count == 0)
+        {
+            return Array.Empty<ChatMessage>();
+        }
+
+        var operationMessages = storedMessages.Select(MapChatMessage).ToArray();
         // Operation-scoped compaction keeps slot-filling and clarification prompts focused on one
         // unit of work even when the parent conversation contains multiple operations.
         return await ReduceMessagesAsync(
@@ -134,14 +137,12 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
     }
 
     private async Task<IReadOnlyCollection<ChatMessage>> ReduceMessagesAsync(
-        IReadOnlyCollection<ConversationMessage> messages,
+        IReadOnlyCollection<ChatMessage> messages,
         int targetCount,
         int thresholdCount,
         CancellationToken cancellationToken)
     {
         var chatMessages = messages
-            .OrderBy(message => message.CreatedAtUtc)
-            .Select(MapChatMessage)
             .ToArray();
 
         if (chatMessages.Length <= thresholdCount)
@@ -171,9 +172,6 @@ public sealed class ConversationHistoryCompactionService : IConversationHistoryC
 
     private static bool ShouldPersistReducedHistory(int originalCount, int reducedCount) =>
         reducedCount > 0 && reducedCount < originalCount;
-
-    private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) =>
-        left >= right ? left : right;
 
     private static IReadOnlyCollection<ChatMessage> LoadStoredMessages(string reducedHistoryJson) =>
         (JsonContent.Deserialize<IReadOnlyCollection<StoredChatMessage>>(reducedHistoryJson) ?? Array.Empty<StoredChatMessage>())

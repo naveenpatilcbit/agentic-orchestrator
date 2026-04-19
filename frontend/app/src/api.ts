@@ -22,6 +22,7 @@ export async function sendMessage(payload: {
   conversationId?: string | null;
   message: string;
   attachmentIds?: string[];
+  clientMessageId?: string;
 }): Promise<ConversationSnapshot> {
   const response = await fetch(`${API_BASE}/api/chat/messages`, {
     method: "POST",
@@ -30,6 +31,7 @@ export async function sendMessage(payload: {
       conversationId: payload.conversationId,
       message: payload.message,
       attachmentIds: payload.attachmentIds ?? [],
+      clientMessageId: payload.clientMessageId ?? null,
     }),
   });
 
@@ -70,6 +72,7 @@ export async function submitReviewDecision(
     finalPayloadJson?: string | null;
     changeRequestText?: string | null;
     notes?: string | null;
+    clientRequestId?: string | null;
   },
 ): Promise<ConversationSnapshot> {
   const response = await fetch(`${API_BASE}/api/reviews/${reviewTaskId}/decision`, {
@@ -80,6 +83,7 @@ export async function submitReviewDecision(
       finalPayloadJson: options?.finalPayloadJson,
       changeRequestText: options?.changeRequestText,
       notes: options?.notes ?? `Submitted from sample UI as ${action}`,
+      clientRequestId: options?.clientRequestId ?? null,
     }),
   });
 

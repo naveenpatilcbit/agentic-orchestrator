@@ -1,7 +1,4 @@
-using System.Text;
 using ConversationalOrchestration.Application.Abstractions;
-using ConversationalOrchestration.Domain.Conversations;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
 namespace ConversationalOrchestration.FundAdministration.CapitalCalls;
@@ -25,17 +22,14 @@ public interface ICapitalCallConversationIntelligence
 
 public sealed class CapitalCallConversationIntelligence : ICapitalCallConversationIntelligence
 {
-    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
-    private readonly IStructuredLlmClient _structuredLlmClient;
+    private readonly IMultiTurnStructuredAgentClient _multiTurnStructuredAgentClient;
     private readonly ILogger<CapitalCallConversationIntelligence> _logger;
 
     public CapitalCallConversationIntelligence(
-        IConversationHistoryCompactionService conversationHistoryCompactionService,
-        IStructuredLlmClient structuredLlmClient,
+        IMultiTurnStructuredAgentClient multiTurnStructuredAgentClient,
         ILogger<CapitalCallConversationIntelligence> logger)
     {
-        _conversationHistoryCompactionService = conversationHistoryCompactionService;
-        _structuredLlmClient = structuredLlmClient;
+        _multiTurnStructuredAgentClient = multiTurnStructuredAgentClient;
         _logger = logger;
     }
 
@@ -78,22 +72,22 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
         bool useConversationHistory,
         CancellationToken cancellationToken)
     {
-        var reducedMessages = useConversationHistory
-            ? await LoadCompactedConversationMessagesAsync(tenantId, conversationId, cancellationToken)
-            : await LoadCompactedOperationMessagesAsync(tenantId, conversationId, operationId, cancellationToken);
-        var effectiveLatestMessage = ResolveEffectiveLatestMessage(latestMessage, reducedMessages);
-        var historyTranscript = BuildTranscript(reducedMessages);
+        var effectiveLatestMessage = latestMessage?.Trim() ?? string.Empty;
         _logger.LogInformation(
-            "Extracting capital call intent patch for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Task={TaskInstruction} ReducedMessages={ReducedMessageCount}",
+            "Extracting capital call intent patch for tenant {TenantId} conversation {ConversationId} operation {OperationId}. Task={TaskInstruction} HistoryScope={HistoryScope}",
             tenantId,
             conversationId,
             operationId,
             taskInstruction,
-            reducedMessages.Count);
+            useConversationHistory ? "conversation" : "operation");
 
-        var llmPatch = await _structuredLlmClient.GetStructuredResponseAsync<CapitalCallIntentPatch>(
-            new StructuredLlmRequest(
+        var llmPatch = await _multiTurnStructuredAgentClient.GetAsync<CapitalCallIntentPatch>(
+            new MultiTurnStructuredAgentRequest(
                 LlmProfile.InputCompletion,
+                tenantId,
+                conversationId,
+                OperationId: useConversationHistory ? null : operationId,
+                SystemPrompt:
                 """
                 You extract structured data for a capital call notice workflow.
                 Return only JSON matching the schema.
@@ -105,16 +99,17 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
                 - partnerOverrides should contain only explicit overrides like "North Star Feeder to 55%".
                 - Never invent partner names, percentages, or dates.
                 """,
+                UserPrompt:
                 $"""
                 Task:
                 {taskInstruction}
 
-                Recent operation conversation:
-                {historyTranscript}
-
                 Latest user message:
                 {effectiveLatestMessage}
-                """),
+                """,
+                AgentId: "capital-call-intent",
+                AgentName: "Capital call intent extractor",
+                AgentDescription: "Extracts capital call intent fields from the conversation."),
             cancellationToken);
 
         if (llmPatch is not null && HasAnyValue(llmPatch))
@@ -136,76 +131,6 @@ public sealed class CapitalCallConversationIntelligence : ICapitalCallConversati
             conversationId,
             operationId);
         return new CapitalCallIntentPatch();
-    }
-
-    private async Task<IReadOnlyList<ChatMessage>> LoadCompactedConversationMessagesAsync(
-        string tenantId,
-        string conversationId,
-        CancellationToken cancellationToken)
-    {
-        var reduced = await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
-            tenantId,
-            conversationId,
-            cancellationToken);
-        return reduced.ToArray();
-    }
-
-    private async Task<IReadOnlyList<ChatMessage>> LoadCompactedOperationMessagesAsync(
-        string tenantId,
-        string conversationId,
-        string operationId,
-        CancellationToken cancellationToken)
-    {
-        var reduced = await _conversationHistoryCompactionService.GetReducedOperationHistoryAsync(
-            tenantId,
-            conversationId,
-            operationId,
-            cancellationToken);
-
-        if (reduced.Count > 0)
-        {
-            return reduced.ToArray();
-        }
-
-        // The very first startup handoff can happen before older intake turns are attached to the
-        // new operation, so fall back to the reduced conversation transcript when needed.
-        reduced = await _conversationHistoryCompactionService.GetReducedConversationHistoryAsync(
-            tenantId,
-            conversationId,
-            cancellationToken);
-        return reduced.ToArray();
-    }
-
-    private static string BuildTranscript(IEnumerable<ChatMessage> messages)
-    {
-        var builder = new StringBuilder();
-        foreach (var message in messages)
-        {
-            builder.Append(message.Role.ToString());
-            builder.Append(": ");
-            builder.AppendLine(message.Text);
-        }
-
-        return builder.Length == 0 ? "(no prior messages)" : builder.ToString().Trim();
-    }
-
-    private static string ResolveEffectiveLatestMessage(
-        string latestMessage,
-        IReadOnlyCollection<ChatMessage> reducedMessages)
-    {
-        if (!string.IsNullOrWhiteSpace(latestMessage))
-        {
-            return latestMessage.Trim();
-        }
-
-        var lastUserMessage = reducedMessages
-            .Reverse()
-            .FirstOrDefault(message => message.Role == ChatRole.User && !string.IsNullOrWhiteSpace(message.Text))
-            ?.Text;
-
-        return string.IsNullOrWhiteSpace(lastUserMessage)
-            ? string.Empty
-            : lastUserMessage.Trim();
     }
 
     private static bool HasAnyValue(CapitalCallIntentPatch patch) =>

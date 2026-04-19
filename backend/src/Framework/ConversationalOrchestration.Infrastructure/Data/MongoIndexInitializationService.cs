@@ -44,13 +44,24 @@ public sealed class MongoIndexInitializationService : IHostedService
                 new CreateIndexModel<ConversationThread>(
                     Builders<ConversationThread>.IndexKeys
                         .Ascending(item => item.TenantId)
-                        .Descending(item => item.UpdatedAtUtc))
+                        .Descending(item => item.UpdatedAtUtc)),
             ],
             cancellationToken: cancellationToken);
 
     private Task EnsureMessageIndexesAsync(CancellationToken cancellationToken) =>
         _collections.Messages.Indexes.CreateManyAsync(
             [
+                new CreateIndexModel<ConversationMessage>(
+                    Builders<ConversationMessage>.IndexKeys
+                        .Ascending(item => item.TenantId)
+                        .Ascending(item => item.ConversationId)
+                        .Ascending(item => item.DeduplicationKey)),
+                new CreateIndexModel<ConversationMessage>(
+                    Builders<ConversationMessage>.IndexKeys
+                        .Ascending(item => item.TenantId)
+                        .Ascending(item => item.ConversationId)
+                        .Ascending(item => item.OperationId)
+                        .Ascending(item => item.CreatedAtUtc)),
                 new CreateIndexModel<ConversationMessage>(
                     Builders<ConversationMessage>.IndexKeys
                         .Ascending(item => item.TenantId)

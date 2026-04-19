@@ -7,6 +7,7 @@ using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.Application.Support;
+using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.AI;
 
@@ -24,6 +25,11 @@ public interface IConversationMessageRepository
     Task AddAsync(ConversationMessage message, CancellationToken cancellationToken);
     Task UpsertAsync(ConversationMessage message, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<ConversationMessage>> ListByConversationAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
+    Task<IReadOnlyCollection<ConversationMessage>> ListHistoryAsync(
+        string conversationId,
+        string tenantId,
+        string? operationId,
+        CancellationToken cancellationToken);
 }
 
 public interface IConversationHistoryCompactionService
@@ -42,6 +48,24 @@ public interface IConversationHistoryCompactionService
         string tenantId,
         string conversationId,
         string operationId,
+        CancellationToken cancellationToken);
+}
+
+public interface IConversationTranscriptService
+{
+    Task<ConversationMessage> AppendAsync(
+        ConversationTranscriptAppendRequest request,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<ConversationMessage>> ListByConversationAsync(
+        string conversationId,
+        string tenantId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<ConversationMessage>> ListHistoryAsync(
+        string conversationId,
+        string tenantId,
+        string? operationId,
         CancellationToken cancellationToken);
 }
 
@@ -130,11 +154,10 @@ public interface IConversationRoutingAgent
     Task<RoutingDecision> RouteAsync(
         string message,
         ConversationThread conversation,
-        IReadOnlyCollection<AgentOperation> operations,
+        AgentOperation? activeOperation,
+        ReviewTask? activeReviewTask,
         IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
-        IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
-        IReadOnlyCollection<ChatMessage> reducedConversationHistory,
         IReadOnlyCollection<AgentDefinition> availableAgents,
         CancellationToken cancellationToken);
 }
@@ -401,3 +424,18 @@ public sealed record ReviewPayloadRevisionResult(
     string? RevisedPayloadJson = null,
     string? ClarificationPrompt = null,
     string? Summary = null);
+
+public sealed record ConversationTranscriptAppendRequest(
+    string TenantId,
+    string ConversationId,
+    string AuthorId,
+    ConversationMessageRole Role,
+    string Content,
+    string MessageKind = "chat",
+    string? OperationId = null,
+    IReadOnlyCollection<AgentAction>? Actions = null,
+    string? SourceType = null,
+    string? SourceMessageId = null,
+    string? DeduplicationKey = null,
+    string? MetadataJson = null,
+    DateTimeOffset? CreatedAtUtc = null);

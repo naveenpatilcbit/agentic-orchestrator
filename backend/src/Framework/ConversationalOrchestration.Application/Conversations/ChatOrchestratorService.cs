@@ -14,6 +14,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
 {
     private readonly IConversationRepository _conversationRepository;
     private readonly IConversationMessageRepository _conversationMessageRepository;
+    private readonly IConversationTranscriptService _conversationTranscriptService;
     private readonly IAgentOperationRepository _operationRepository;
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAuditEventRepository _auditEventRepository;
@@ -27,6 +28,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     public ChatOrchestratorService(
         IConversationRepository conversationRepository,
         IConversationMessageRepository conversationMessageRepository,
+        IConversationTranscriptService conversationTranscriptService,
         IAgentOperationRepository operationRepository,
         IReviewTaskRepository reviewTaskRepository,
         IAuditEventRepository auditEventRepository,
@@ -39,6 +41,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     {
         _conversationRepository = conversationRepository;
         _conversationMessageRepository = conversationMessageRepository;
+        _conversationTranscriptService = conversationTranscriptService;
         _operationRepository = operationRepository;
         _reviewTaskRepository = reviewTaskRepository;
         _auditEventRepository = auditEventRepository;
@@ -65,22 +68,29 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             attachments.Count,
             request.Message.Length);
 
-        var userMessage = new ConversationMessage
-        {
-            TenantId = context.TenantId,
-            ConversationId = conversation.Id,
-            AuthorId = context.UserId,
-            Role = ConversationMessageRole.User,
-            Content = request.Message
-        };
+        var userMessage = await _conversationTranscriptService.AppendAsync(
+            new ConversationTranscriptAppendRequest(
+                context.TenantId,
+                conversation.Id,
+                context.UserId,
+                ConversationMessageRole.User,
+                request.Message,
+                OperationId: null,
+                SourceType: "chat-user",
+                SourceMessageId: request.ClientMessageId,
+                DeduplicationKey: $"chat-user:{request.ClientMessageId ?? Guid.NewGuid().ToString("N")}"),
+            cancellationToken);
 
-        await _conversationMessageRepository.AddAsync(userMessage, cancellationToken);
-        await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, conversation.Id, cancellationToken);
-
-        // A single conversation can carry multiple operations at once, so routing always looks at
-        // active operations and review tasks before deciding whether this message is new work.
+        // Each thread carries one active operation at a time, so routing first resolves that
+        // session state before deciding whether the message continues work or starts something new.
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
+        var activeOperation = ConversationSessionStateResolver.ResolveActiveOperation(conversation, operations);
+        if (ConversationSessionStateResolver.SyncConversationPointers(conversation, activeOperation))
+        {
+            conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await _conversationRepository.UpsertAsync(conversation, cancellationToken);
+        }
         var routingDecision = await _routingService.DecideAsync(request.Message, conversation, operations, reviewTasks, attachments, cancellationToken);
         _logger.LogInformation(
             "Routing decision {DecisionType} selected for tenant {TenantId} conversation {ConversationId}. AgentId={AgentId} OperationId={OperationId} ReviewTaskId={ReviewTaskId} Explanation={Explanation}",
@@ -101,10 +111,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 await HandleContinueOperationAsync(conversation, userMessage, routingDecision, attachments, context, cancellationToken);
                 break;
             case RoutingDecisionType.RespondToReviewTask:
-                await HandleReviewResponseAsync(routingDecision, request.Message, context, cancellationToken);
+                await HandleReviewResponseAsync(userMessage, routingDecision, request.Message, context, cancellationToken);
                 break;
             case RoutingDecisionType.AskStatus:
-                await HandleStatusRequestAsync(conversation, routingDecision, context, cancellationToken);
+                await HandleStatusRequestAsync(conversation, userMessage, routingDecision, context, cancellationToken);
                 break;
             case RoutingDecisionType.AnswerDirectly:
                 await AddAssistantMessageAsync(
@@ -112,15 +122,19 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                     context,
                     routingDecision.AssistantMessage ?? "I can help with that.",
                     null,
-                    "chat");
+                    "chat",
+                    sourceMessageId: userMessage.Id,
+                    deduplicationKey: $"assistant:{userMessage.Id}:chat");
                 break;
             default:
                 await AddAssistantMessageAsync(
                     conversation.Id,
                     context,
-                    "I can help, but I need a little more direction because there are multiple active threads in this conversation. Try naming the workflow you want to continue, or ask me to start a new one explicitly.",
+                    "I need a little more direction before I continue this thread. Tell me whether you want to continue the current workflow, review the pending step, ask for status, or start a new thread for different work.",
                     null,
-                    "routing");
+                    "routing",
+                    sourceMessageId: userMessage.Id,
+                    deduplicationKey: $"assistant:{userMessage.Id}:routing");
                 break;
         }
 
@@ -153,7 +167,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             return null;
         }
 
-        var messages = await _conversationMessageRepository.ListByConversationAsync(conversationId, context.TenantId, cancellationToken);
+        var messages = await _conversationTranscriptService.ListByConversationAsync(conversationId, context.TenantId, cancellationToken);
         var operations = await _operationRepository.ListByConversationAsync(conversationId, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversationId, context.TenantId, cancellationToken);
         var files = await _fileAssetRepository.ListByConversationAsync(conversationId, context.TenantId, cancellationToken);
@@ -181,16 +195,18 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
 
         foreach (var conversation in conversations.OrderByDescending(item => item.UpdatedAtUtc))
         {
-            var messages = await _conversationMessageRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
+            var messages = await _conversationTranscriptService.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
             var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
             var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
+            var activeOperation = ConversationSessionStateResolver.ResolveActiveOperation(conversation, operations);
+            var activeReviewTask = ConversationSessionStateResolver.ResolveActiveReviewTask(activeOperation, reviewTasks);
 
             summaries.Add(new ConversationSummaryDto(
                 conversation.Id,
                 conversation.Title,
                 messages.Count,
-                operations.Count(operation => operation.Status is not AgentOperationStatus.Completed and not AgentOperationStatus.Failed and not AgentOperationStatus.Cancelled),
-                reviewTasks.Count(task => task.Status == ReviewTaskStatus.Open),
+                activeOperation is null ? 0 : 1,
+                activeReviewTask is null ? 0 : 1,
                 conversation.UpdatedAtUtc));
         }
 
@@ -217,7 +233,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             SourceOperationId = routingDecision.SourceOperationId,
             SourceOutputId = routingDecision.SourceOutputId
         };
-
+        // TODO: Understand the purpose of SOurceOPerationId
         if (!string.IsNullOrWhiteSpace(routingDecision.SourceOperationId) ||
             !string.IsNullOrWhiteSpace(routingDecision.SourceOutputId))
         {
@@ -237,6 +253,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             agent.Definition.Id,
             context.TenantId,
             conversation.Id);
+        conversation.ActiveOperationId = operation.Id;
         conversation.LastFocusedOperationId = operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
@@ -244,7 +261,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         {
             var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
             var result = await agent.StartAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
-            await PersistAgentResultAsync(conversation, result, context, cancellationToken);
+            await PersistAgentResultAsync(conversation, userMessage, result, context, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -280,12 +297,21 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 },
                 cancellationToken);
 
+            if (string.Equals(conversation.ActiveOperationId, operation.Id, StringComparison.Ordinal))
+            {
+                conversation.ActiveOperationId = null;
+                conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                await _conversationRepository.UpsertAsync(conversation, cancellationToken);
+            }
+
             await AddAssistantMessageAsync(
                 conversation.Id,
                 context,
                 $"I couldn't start {agent.Definition.DisplayName} yet: {exception.Message}",
                 operation.Id,
-                "status");
+                "status",
+                sourceMessageId: userMessage.Id,
+                deduplicationKey: $"agent-start-failed:{userMessage.Id}:{operation.Id}");
         }
     }
 
@@ -305,7 +331,14 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 routingDecision.OperationId,
                 context.TenantId,
                 conversation.Id);
-            await AddAssistantMessageAsync(conversation.Id, context, "I couldn't find that operation anymore, so please restate the request and I'll start a fresh one.", null, "routing");
+            await AddAssistantMessageAsync(
+                conversation.Id,
+                context,
+                "I couldn't find that operation anymore, so please restate the request and I'll start a fresh one.",
+                null,
+                "routing",
+                sourceMessageId: userMessage.Id,
+                deduplicationKey: $"missing-operation:{userMessage.Id}:{routingDecision.OperationId}");
             return;
         }
 
@@ -318,15 +351,17 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             conversation.Id,
             operation.Status,
             operation.CurrentStep);
+        conversation.ActiveOperationId = operation.Id;
         conversation.LastFocusedOperationId = operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
         var conversationHistory = await AttachOperationToUserMessageAndLoadHistoryAsync(userMessage, operation.Id, context, cancellationToken);
         var result = await agent.ContinueAsync(conversation, conversationHistory, userMessage, operation, attachments, context, cancellationToken);
-        await PersistAgentResultAsync(conversation, result, context, cancellationToken);
+        await PersistAgentResultAsync(conversation, userMessage, result, context, cancellationToken);
     }
 
     private async Task HandleReviewResponseAsync(
+        ConversationMessage userMessage,
         RoutingDecision routingDecision,
         string message,
         TenantExecutionContext context,
@@ -340,12 +375,20 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         var result = await _reviewTaskService.HandleChatDecisionAsync(routingDecision, message, context, cancellationToken);
         if (!string.IsNullOrWhiteSpace(result.ConversationId))
         {
-            await AddAssistantMessageAsync(result.ConversationId, context, result.AssistantMessage, result.OperationId, "review");
+            await AddAssistantMessageAsync(
+                result.ConversationId,
+                context,
+                result.AssistantMessage,
+                result.OperationId,
+                "review",
+                sourceMessageId: userMessage.Id,
+                deduplicationKey: $"review-response:{userMessage.Id}");
         }
     }
 
     private async Task HandleStatusRequestAsync(
         ConversationThread conversation,
+        ConversationMessage userMessage,
         RoutingDecision routingDecision,
         TenantExecutionContext context,
         CancellationToken cancellationToken)
@@ -377,21 +420,32 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         }
         else
         {
-            var active = operations
-                .Where(static operation => operation.Status is not AgentOperationStatus.Completed and not AgentOperationStatus.Failed and not AgentOperationStatus.Cancelled)
-                .OrderByDescending(operation => operation.UpdatedAtUtc)
-                .ToArray();
-
-            response = active.Length == 0
-                ? "There are no active operations in this conversation right now."
-                : $"Here's the active work summary:\n- {string.Join("\n- ", active.Select(operation => $"{operation.Title}: {operation.Status} ({operation.CurrentStep})"))}";
+            var activeOperation = ConversationSessionStateResolver.ResolveActiveOperation(conversation, operations);
+            if (activeOperation is null)
+            {
+                response = "There is no active workflow in this thread right now.";
+            }
+            else
+            {
+                operationId = activeOperation.Id;
+                response = await _agentCatalog.Resolve(activeOperation.AgentId)
+                    .DescribeStatusAsync(activeOperation, reviewTasks.Where(task => task.OperationId == activeOperation.Id).ToArray(), cancellationToken);
+            }
         }
 
-        await AddAssistantMessageAsync(conversation.Id, context, response, operationId, "status");
+        await AddAssistantMessageAsync(
+            conversation.Id,
+            context,
+            response,
+            operationId,
+            "status",
+            sourceMessageId: userMessage.Id,
+            deduplicationKey: $"status:{userMessage.Id}:{operationId ?? "thread"}");
     }
 
     private async Task PersistAgentResultAsync(
         ConversationThread conversation,
+        ConversationMessage userMessage,
         AgentExecutionResult result,
         TenantExecutionContext context,
         CancellationToken cancellationToken)
@@ -407,6 +461,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             result.Operation.CurrentStep,
             result.Actions?.Count ?? 0);
 
+        var nextActiveOperation = ConversationSessionStateResolver.IsActiveOperation(result.Operation)
+            ? result.Operation
+            : null;
+        ConversationSessionStateResolver.SyncConversationPointers(conversation, nextActiveOperation);
         conversation.LastFocusedOperationId = result.Operation.Id;
         conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await _conversationRepository.UpsertAsync(conversation, cancellationToken);
@@ -419,13 +477,23 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             result.AssistantMessage,
             result.Operation.Id,
             "chat",
-            result.Actions);
+            result.Actions,
+            sourceMessageId: userMessage.Id,
+            deduplicationKey: $"agent-result:{userMessage.Id}:{result.Operation.Id}:chat");
 
         if (!string.IsNullOrWhiteSpace(result.FollowUpSystemMessage))
         {
-            await AddAssistantMessageAsync(conversation.Id, context, result.FollowUpSystemMessage, result.Operation.Id, "status");
+            await AddAssistantMessageAsync(
+                conversation.Id,
+                context,
+                result.FollowUpSystemMessage,
+                result.Operation.Id,
+                "status",
+                sourceMessageId: userMessage.Id,
+                deduplicationKey: $"agent-result:{userMessage.Id}:{result.Operation.Id}:status",
+                role: ConversationMessageRole.System);
         }
-
+        // TODO: Understand the prupose of audit events
         if (result.AuditEvents is not null)
         {
             foreach (var auditEvent in result.AuditEvents)
@@ -449,10 +517,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 if (existing.Title == "New conversation")
                 {
                     existing.Title = BuildConversationTitle(openingMessage);
+                    existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    await _conversationRepository.UpsertAsync(existing, cancellationToken);
                 }
 
-                existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                await _conversationRepository.UpsertAsync(existing, cancellationToken);
                 _logger.LogDebug(
                     "Resolved existing conversation {ConversationId} for tenant {TenantId}.",
                     existing.Id,
@@ -512,7 +580,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         await _conversationMessageRepository.UpsertAsync(userMessage, cancellationToken);
         await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, userMessage.ConversationId, cancellationToken);
 
-        return await _conversationMessageRepository.ListByConversationAsync(userMessage.ConversationId, context.TenantId, cancellationToken);
+        return await _conversationTranscriptService.ListByConversationAsync(userMessage.ConversationId, context.TenantId, cancellationToken);
     }
 
     private async Task AddAssistantMessageAsync(
@@ -521,23 +589,25 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         string content,
         string? operationId,
         string messageKind,
-        IReadOnlyCollection<AgentAction>? actions = null)
+        IReadOnlyCollection<AgentAction>? actions = null,
+        string? sourceMessageId = null,
+        string? deduplicationKey = null,
+        ConversationMessageRole role = ConversationMessageRole.Assistant)
     {
-        await _conversationMessageRepository.AddAsync(
-            new ConversationMessage
-            {
-                TenantId = context.TenantId,
-                ConversationId = conversationId,
-                OperationId = operationId,
-                AuthorId = "system",
-                Role = ConversationMessageRole.Assistant,
-                Content = content,
-                MessageKind = messageKind,
-                ActionsJson = actions is null ? null : JsonContent.Serialize(actions)
-            },
+        await _conversationTranscriptService.AppendAsync(
+            new ConversationTranscriptAppendRequest(
+                context.TenantId,
+                conversationId,
+                role == ConversationMessageRole.System ? "system" : "assistant",
+                role,
+                content,
+                messageKind,
+                OperationId: operationId,
+                Actions: actions,
+                SourceType: role == ConversationMessageRole.System ? "system-generated" : "assistant-generated",
+                SourceMessageId: sourceMessageId,
+                DeduplicationKey: deduplicationKey),
             CancellationToken.None);
-
-        await _conversationHistoryCompactionService.RefreshAsync(context.TenantId, conversationId, CancellationToken.None);
     }
 
     private static ConversationMessageDto MapMessage(ConversationMessage message)

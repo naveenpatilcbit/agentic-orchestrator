@@ -6,7 +6,6 @@ using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
 using ConversationalOrchestration.Domain.Reviews;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
 namespace ConversationalOrchestration.Infrastructure.AI;
@@ -18,33 +17,46 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    private readonly IStructuredLlmClient _structuredLlmClient;
+    private readonly IMultiTurnStructuredAgentClient _multiTurnStructuredAgentClient;
     private readonly ILogger<LlmConversationRoutingAgent> _logger;
 
     public LlmConversationRoutingAgent(
-        IStructuredLlmClient structuredLlmClient,
+        IMultiTurnStructuredAgentClient multiTurnStructuredAgentClient,
         ILogger<LlmConversationRoutingAgent> logger)
     {
-        _structuredLlmClient = structuredLlmClient;
+        _multiTurnStructuredAgentClient = multiTurnStructuredAgentClient;
         _logger = logger;
     }
 
     public async Task<RoutingDecision> RouteAsync(
         string message,
         ConversationThread conversation,
-        IReadOnlyCollection<AgentOperation> operations,
+        AgentOperation? activeOperation,
+        ReviewTask? activeReviewTask,
         IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
-        IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
-        IReadOnlyCollection<ChatMessage> reducedConversationHistory,
         IReadOnlyCollection<AgentDefinition> availableAgents,
         CancellationToken cancellationToken)
     {
-        var decision = await _structuredLlmClient.GetStructuredResponseAsync<LlmRoutingDecision>(
-            new StructuredLlmRequest(
+        var decision = await _multiTurnStructuredAgentClient.GetAsync<LlmRoutingDecision>(
+            new MultiTurnStructuredAgentRequest(
                 LlmProfile.Routing,
+                conversation.TenantId,
+                conversation.Id,
+                OperationId: null,
                 BuildSystemPrompt(),
-                BuildUserPrompt(message, conversation, operations, completedOutputs, reviewTasks, attachments, reducedConversationHistory, availableAgents)),
+                BuildUserPrompt(
+                    message,
+                    conversation,
+                    activeOperation,
+                    activeReviewTask,
+                    completedOutputs,
+                    attachments,
+                    availableAgents),
+                AgentId: "routing-agent",
+                AgentName: "Routing agent",
+                AgentDescription: "Classifies user messages into orchestration routing decisions.",
+                ChatOptions: null),
             cancellationToken);
 
         if (decision is null || string.IsNullOrWhiteSpace(decision.DecisionType))
@@ -73,8 +85,11 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
 
         Rules:
         - Use only ids that exist in the provided context.
+        - There can be at most one active operation and at most one open review task in the session.
         - If the user is approving or rejecting a review task, prefer RespondToReviewTask.
         - If the user asks for status, use AskStatus.
+        - If an active operation exists and the user is answering its clarification, continuing its work, or referring to the current task, use ContinueOperation.
+        - If an active operation exists and the user asks to start unrelated new work in the same thread, use AnswerDirectly and tell them to start a new thread or finish the current work first.
         - Completed outputs are reusable results from prior finished operations. Use them when the user asks to do the next step from prior approved work.
         - If the user is starting a fresh request for an available capability, inspect that agent's startRequirements, the reducedConversationHistory, and the available attachments before deciding whether the request is ready to start.
         - If the requested agent depends on a compatible completed output, inspect completedOutputs and the agent sourceRequirements.
@@ -106,11 +121,10 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
     private static string BuildUserPrompt(
         string message,
         ConversationThread conversation,
-        IReadOnlyCollection<AgentOperation> operations,
+        AgentOperation? activeOperation,
+        ReviewTask? activeReviewTask,
         IReadOnlyCollection<CompletedOperationOutputSummary> completedOutputs,
-        IReadOnlyCollection<ReviewTask> reviewTasks,
         IReadOnlyCollection<FileAsset> attachments,
-        IReadOnlyCollection<ChatMessage> reducedConversationHistory,
         IReadOnlyCollection<AgentDefinition> availableAgents)
     {
         var payload = new
@@ -120,28 +134,37 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
             {
                 conversation.Id,
                 conversation.Title,
-                conversation.LastFocusedOperationId
+                conversation.LastFocusedOperationId,
+                conversation.ActiveOperationId
             },
+            activeOperation = activeOperation is null
+                ? null
+                : new
+                {
+                    activeOperation.Id,
+                    activeOperation.AgentId,
+                    activeOperation.Title,
+                    Status = activeOperation.Status.ToString(),
+                    activeOperation.CurrentStep,
+                    activeOperation.PendingClarification,
+                    activeOperation.UpdatedAtUtc
+                },
+            activeReviewTask = activeReviewTask is null
+                ? null
+                : new
+                {
+                    activeReviewTask.Id,
+                    activeReviewTask.OperationId,
+                    activeReviewTask.Title,
+                    activeReviewTask.TaskType,
+                    Status = activeReviewTask.Status.ToString(),
+                    activeReviewTask.UpdatedAtUtc
+                },
             attachments = attachments.Select(file => new
             {
                 file.Id,
                 file.FileName,
                 file.ContentType
-            }),
-            reducedConversationHistory = reducedConversationHistory.Select(item => new
-            {
-                Role = item.Role.Value,
-                item.Text
-            }),
-            operations = operations.Select(operation => new
-            {
-                operation.Id,
-                operation.AgentId,
-                operation.Title,
-                Status = operation.Status.ToString(),
-                operation.CurrentStep,
-                operation.PendingClarification,
-                operation.UpdatedAtUtc
             }),
             completedOutputs = completedOutputs.Select(output => new
             {
@@ -155,15 +178,6 @@ public sealed class LlmConversationRoutingAgent : IConversationRoutingAgent
                 output.CompatibleAgentIds,
                 output.IsLastFocusedOperation,
                 output.UpdatedAtUtc
-            }),
-            reviewTasks = reviewTasks.Select(task => new
-            {
-                task.Id,
-                task.OperationId,
-                task.Title,
-                task.TaskType,
-                Status = task.Status.ToString(),
-                task.UpdatedAtUtc
             }),
             availableAgents = availableAgents.Select(agent => new
             {

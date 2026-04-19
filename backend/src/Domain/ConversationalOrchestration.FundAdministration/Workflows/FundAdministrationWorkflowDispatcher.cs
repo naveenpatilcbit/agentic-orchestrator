@@ -8,6 +8,8 @@ using ConversationalOrchestration.Domain.Reviews;
 using ConversationalOrchestration.Domain.Workflows;
 using ConversationalOrchestration.FundAdministration.CapitalCalls;
 using Microsoft.Extensions.Logging;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace ConversationalOrchestration.FundAdministration.Workflows;
 
@@ -61,9 +63,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAgentOperationRepository _operationRepository;
     private readonly IOperationOutputRepository _operationOutputRepository;
-    private readonly IConversationMessageRepository _conversationMessageRepository;
+    private readonly IConversationTranscriptService _conversationTranscriptService;
     private readonly IAuditEventRepository _auditEventRepository;
-    private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
     private readonly ILogger<FundAdministrationWorkflowDispatcher> _logger;
 
     public FundAdministrationWorkflowDispatcher(
@@ -74,9 +75,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         IReviewTaskRepository reviewTaskRepository,
         IAgentOperationRepository operationRepository,
         IOperationOutputRepository operationOutputRepository,
-        IConversationMessageRepository conversationMessageRepository,
+        IConversationTranscriptService conversationTranscriptService,
         IAuditEventRepository auditEventRepository,
-        IConversationHistoryCompactionService conversationHistoryCompactionService,
         ILogger<FundAdministrationWorkflowDispatcher> logger)
     {
         _capitalCallConversationIntelligence = capitalCallConversationIntelligence;
@@ -86,9 +86,8 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         _reviewTaskRepository = reviewTaskRepository;
         _operationRepository = operationRepository;
         _operationOutputRepository = operationOutputRepository;
-        _conversationMessageRepository = conversationMessageRepository;
+        _conversationTranscriptService = conversationTranscriptService;
         _auditEventRepository = auditEventRepository;
-        _conversationHistoryCompactionService = conversationHistoryCompactionService;
         _logger = logger;
     }
 
@@ -721,6 +720,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             preparation.RequestState.Profile,
             preparation.RequestState.FundName,
             preparation.RequestState.CapitalCallAmount);
+
         operation.Status = AgentOperationStatus.Running;
         operation.CurrentStep = "CapitalCallWorkflow";
         operation.PendingClarification = null;
@@ -810,23 +810,25 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
         string content,
         CancellationToken cancellationToken)
     {
-        await _conversationMessageRepository.AddAsync(
-            new ConversationMessage
-            {
-                TenantId = operation.TenantId,
-                ConversationId = operation.ConversationId,
-                OperationId = operation.Id,
-                AuthorId = "workflow",
-                Role = ConversationMessageRole.System,
-                Content = content,
-                MessageKind = "workflow"
-            },
+        await _conversationTranscriptService.AppendAsync(
+            new ConversationTranscriptAppendRequest(
+                operation.TenantId,
+                operation.ConversationId,
+                "workflow",
+                ConversationMessageRole.System,
+                content,
+                "workflow",
+                OperationId: operation.Id,
+                SourceType: "workflow-update",
+                SourceMessageId: operation.WorkflowInstanceId ?? operation.Id,
+                DeduplicationKey: CreateWorkflowDeduplicationKey(operation, content)),
             cancellationToken);
+    }
 
-        await _conversationHistoryCompactionService.RefreshAsync(
-            operation.TenantId,
-            operation.ConversationId,
-            cancellationToken);
+    private static string CreateWorkflowDeduplicationKey(AgentOperation operation, string content)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content));
+        return $"workflow:{operation.Id}:{operation.Status}:{operation.CurrentStep}:{Convert.ToHexString(bytes).ToLowerInvariant()}";
     }
 
     private async Task<OperationOutput> PublishCapitalCallOutputAsync(

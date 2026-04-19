@@ -1,7 +1,14 @@
 .idea/
 .vscode/
+.DS_Store
+**/.DS_Store
+*.DotSettings.user
 **/bin/
 **/obj/
 **/uploads/
 frontend/app/node_modules/
 frontend/app/dist/
+
+# Local-only API config (contains secrets during dev)
+backend/src/Hosts/ConversationalOrchestration.Api/appsettings.json
+backend/src/Hosts/ConversationalOrchestration.Api/appsettings.Development.json
