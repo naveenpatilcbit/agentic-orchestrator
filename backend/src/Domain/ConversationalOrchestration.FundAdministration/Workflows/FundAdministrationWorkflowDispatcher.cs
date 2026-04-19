@@ -527,7 +527,29 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             return;
         }
 
-        if (result.PendingRequests.Count > 0)
+        // Final approval can yield the completion payload in the same resume cycle. Honor that
+        // before reopening any human-review state so we do not bounce back into confirmation.
+        var completion = result.Outputs
+            .FirstOrDefault(output => string.Equals(output.OutputType, nameof(CapitalCallWorkflowCompleted), StringComparison.Ordinal));
+        if (completion is not null)
+        {
+            if (!completion.TryGetPayload<CapitalCallWorkflowCompleted>(out var completedPayload) || completedPayload is null)
+            {
+                throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
+            }
+
+            var publishedOutput = await PublishCapitalCallOutputAsync(operation, completedPayload, cancellationToken);
+
+            operation.Status = AgentOperationStatus.Completed;
+            operation.CurrentStep = "TemplateRendering";
+            operation.PendingClarification = null;
+            operation.ActiveReviewTaskId = null;
+            operation.Summary = "Final capital call allocations are confirmed. Template rendering is the current step.";
+            operation.DataJson = publishedOutput.PayloadJson;
+            await _operationRepository.UpsertAsync(operation, cancellationToken);
+        }
+
+        else if (result.PendingRequests.Count > 0)
         {
             var nextRequest = result.PendingRequests.Last();
             if (string.Equals(nextRequest.PortId, CapitalCallNoticeWorkflowPorts.ExtractionReview, StringComparison.Ordinal))
@@ -546,10 +568,6 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 operation.ActiveReviewTaskId = reviewTask.Id;
                 operation.Summary = "Extracted partner and feeder commitment data is ready for review. Download the workbook, edit the payload if needed, then submit it so the allocation engine can continue.";
                 await _operationRepository.UpsertAsync(operation, cancellationToken);
-                await AddConversationUpdateAsync(
-                    operation,
-                    "I extracted the partner, feeder, and commitment data for this capital call. Review it from the review queue, make any corrections you need, and submit it so I can calculate the final allocations.",
-                    cancellationToken);
                 await _auditEventRepository.AddAsync(
                     BuildCapitalCallAuditEvent(operation, "CapitalCallReviewRequested", new
                     {
@@ -576,10 +594,6 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
                 operation.ActiveReviewTaskId = reviewTask.Id;
                 operation.Summary = "Final capital call allocations are ready for confirmation. Review the computed amounts and approve them to finish the workflow.";
                 await _operationRepository.UpsertAsync(operation, cancellationToken);
-                await AddConversationUpdateAsync(
-                    operation,
-                    "I calculated the final capital call allocations. Review the totals in the review queue and approve them when everything looks right.",
-                    cancellationToken);
                 await _auditEventRepository.AddAsync(
                     BuildCapitalCallAuditEvent(operation, "CapitalCallAllocationConfirmationRequested", new
                     {
@@ -619,31 +633,7 @@ public sealed class FundAdministrationWorkflowDispatcher : IFundAdministrationWo
             return;
         }
 
-        var completion = result.Outputs
-            .FirstOrDefault(output => string.Equals(output.OutputType, nameof(CapitalCallWorkflowCompleted), StringComparison.Ordinal));
-        if (completion is not null)
-        {
-            if (!completion.TryGetPayload<CapitalCallWorkflowCompleted>(out var completedPayload) || completedPayload is null)
-            {
-                throw new InvalidOperationException("Capital call workflow completion payload could not be parsed.");
-            }
-
-            var publishedOutput = await PublishCapitalCallOutputAsync(operation, completedPayload, cancellationToken);
-
-            operation.Status = AgentOperationStatus.Completed;
-            operation.CurrentStep = "TemplateRendering";
-            operation.PendingClarification = null;
-            operation.ActiveReviewTaskId = null;
-            operation.Summary = "Final capital call allocations are confirmed. Template rendering is the current step.";
-            operation.DataJson = publishedOutput.PayloadJson;
-            await _operationRepository.UpsertAsync(operation, cancellationToken);
-            await AddConversationUpdateAsync(
-                operation,
-                "Capital call allocation confirmation is complete. The approved allocation data is ready, and template rendering is now the current step.",
-                cancellationToken);
-        }
-
-        else
+        if (completion is null)
         {
             var persistedOperation = await _operationRepository.GetAsync(operation.Id, context.TenantId, cancellationToken);
             if (persistedOperation is not null && HasWorkflowManagedCapitalCallState(persistedOperation))

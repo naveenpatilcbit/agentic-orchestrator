@@ -119,6 +119,11 @@ public sealed class ReviewTaskService : IReviewTaskService
             context,
             cancellationToken);
 
+        if (UsesWorkflowDrivenReviewMessaging(reviewTask))
+        {
+            return result;
+        }
+
         return new ChatInteractionResult(
             action == "Approved"
                 ? $"{reviewTask.Title} is approved. I resumed the workflow from the same conversation thread."
@@ -268,7 +273,8 @@ public sealed class ReviewTaskService : IReviewTaskService
         await _reviewTaskRepository.UpsertAsync(reviewTask, cancellationToken);
         await _operationRepository.UpsertAsync(operation, cancellationToken);
 
-        if (ShouldEchoCommentToConversation(request))
+        var echoReviewComment = ShouldEchoCommentToConversation(request);
+        if (echoReviewComment)
         {
             await _conversationMessageRepository.AddAsync(
                 new ConversationMessage
@@ -284,25 +290,33 @@ public sealed class ReviewTaskService : IReviewTaskService
                 cancellationToken);
         }
 
-        await _conversationMessageRepository.AddAsync(
-            new ConversationMessage
-            {
-                TenantId = context.TenantId,
-                ConversationId = conversation.Id,
-                OperationId = operation.Id,
-                AuthorId = "system",
-                Role = ConversationMessageRole.System,
-                Content = outcome.ContinuesWorkflow
-                    ? $"{reviewTask.Title} {outcome.ActionLabel}. Resuming {operation.Title}."
-                    : $"{reviewTask.Title} {outcome.ActionLabel}. {operation.Title} is paused until the data is corrected.",
-                MessageKind = "review"
-            },
-            cancellationToken);
+        var conversationUpdated = echoReviewComment;
+        if (!UsesWorkflowDrivenReviewMessaging(reviewTask))
+        {
+            await _conversationMessageRepository.AddAsync(
+                new ConversationMessage
+                {
+                    TenantId = context.TenantId,
+                    ConversationId = conversation.Id,
+                    OperationId = operation.Id,
+                    AuthorId = "system",
+                    Role = ConversationMessageRole.System,
+                    Content = outcome.ContinuesWorkflow
+                        ? $"{reviewTask.Title} {outcome.ActionLabel}. Resuming {operation.Title}."
+                        : $"{reviewTask.Title} {outcome.ActionLabel}. {operation.Title} is paused until the data is corrected.",
+                    MessageKind = "review"
+                },
+                cancellationToken);
+            conversationUpdated = true;
+        }
 
-        await _conversationHistoryCompactionService.RefreshAsync(
-            context.TenantId,
-            conversation.Id,
-            cancellationToken);
+        if (conversationUpdated)
+        {
+            await _conversationHistoryCompactionService.RefreshAsync(
+                context.TenantId,
+                conversation.Id,
+                cancellationToken);
+        }
 
         await _auditEventRepository.AddAsync(
             new AuditEvent
@@ -335,9 +349,7 @@ public sealed class ReviewTaskService : IReviewTaskService
             operation.CurrentStep);
 
         return new ChatInteractionResult(
-            outcome.ContinuesWorkflow
-                ? $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is continuing from the saved checkpoint."
-                : $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is paused for correction.",
+            ResolveAssistantMessage(reviewTask, outcome, operation),
             conversation.Id,
             operation.Id);
     }
@@ -374,6 +386,36 @@ public sealed class ReviewTaskService : IReviewTaskService
         ReviewTaskStatus Status,
         string ActionLabel,
         string? PendingClarification);
+
+    private static bool UsesWorkflowDrivenReviewMessaging(ReviewTask reviewTask) =>
+        reviewTask.TaskType.StartsWith("CapitalCall", StringComparison.Ordinal);
+
+    private static string ResolveAssistantMessage(
+        ReviewTask reviewTask,
+        ReviewOutcome outcome,
+        AgentOperation operation)
+    {
+        if (UsesWorkflowDrivenReviewMessaging(reviewTask))
+        {
+            if (!string.IsNullOrWhiteSpace(operation.PendingClarification))
+            {
+                return operation.PendingClarification;
+            }
+
+            var resumedToConcreteState =
+                operation.Status != AgentOperationStatus.Running ||
+                !string.Equals(operation.CurrentStep, "ResumeRequested", StringComparison.Ordinal);
+
+            if (resumedToConcreteState && !string.IsNullOrWhiteSpace(operation.Summary))
+            {
+                return operation.Summary;
+            }
+        }
+
+        return outcome.ContinuesWorkflow
+            ? $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is continuing from the saved checkpoint."
+            : $"{reviewTask.Title} {outcome.ActionLabel}. The workflow is paused for correction.";
+    }
 
     private async Task<ReviewPayloadRevisionResult> ResolveFinalPayloadAsync(
         ReviewTask reviewTask,
