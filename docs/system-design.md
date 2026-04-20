@@ -37,6 +37,7 @@ This repo contains a working sample implementation of that architecture using:
 - Tenant isolation is enforced in storage and APIs, not delegated to prompts.
 - Auditability is built into every stage: message, routing, agent result, review, and workflow continuation.
 - LLM usage is provider-neutral at the application boundary; provider SDKs stay isolated in infrastructure.
+- Multi-step requests should be executed deterministically via an application-owned plan and executor when enterprise safety, audit, and idempotency matter. See `docs/workflow-chaining-strategies.md`.
 
 ## 3. Scope
 
