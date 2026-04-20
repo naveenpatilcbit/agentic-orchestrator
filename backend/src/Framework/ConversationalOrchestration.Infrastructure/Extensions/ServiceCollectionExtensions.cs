@@ -1,7 +1,6 @@
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Application.Agents;
 using ConversationalOrchestration.Application.Conversations;
-using ConversationalOrchestration.Application.Operations;
 using ConversationalOrchestration.Application.Reviews;
 using ConversationalOrchestration.Infrastructure.AI;
 using ConversationalOrchestration.Infrastructure.Configuration;
@@ -22,7 +21,6 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddConversationalOrchestrationCore(this IServiceCollection services)
     {
         services.AddScoped<IAgentCatalog, AgentCatalog>();
-        services.AddScoped<IMessageRoutingService, MessageRoutingService>();
         services.AddScoped<IChatOrchestratorService, ChatOrchestratorService>();
         services.AddScoped<IReviewTaskService, ReviewTaskService>();
         return services;
@@ -44,7 +42,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IStructuredLlmClient>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddSingleton<ConversationalOrchestration.Infrastructure.AI.ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddScoped<IMultiTurnStructuredAgentClient, MultiTurnStructuredAgentClient>();
-        services.AddScoped<IConversationRoutingAgent, LlmConversationRoutingAgent>();
+        services.AddScoped<IMasterOrchestrationAgent, MasterOrchestrationAgent>();
         services.AddScoped<IAgentInputCompletionService, LlmAgentInputCompletionService>();
         services.AddScoped<IReviewPayloadRevisionService, LlmReviewPayloadRevisionService>();
         services.AddScoped<IConversationTranscriptService, ConversationTranscriptService>();

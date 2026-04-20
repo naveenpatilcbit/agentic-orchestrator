@@ -19,10 +19,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     private readonly IReviewTaskRepository _reviewTaskRepository;
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IFileAssetRepository _fileAssetRepository;
-    private readonly IMessageRoutingService _routingService;
     private readonly IAgentCatalog _agentCatalog;
     private readonly IReviewTaskService _reviewTaskService;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
+    private readonly IMasterOrchestrationAgent _masterOrchestrationAgent;
     private readonly ILogger<ChatOrchestratorService> _logger;
 
     public ChatOrchestratorService(
@@ -33,10 +33,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         IReviewTaskRepository reviewTaskRepository,
         IAuditEventRepository auditEventRepository,
         IFileAssetRepository fileAssetRepository,
-        IMessageRoutingService routingService,
         IAgentCatalog agentCatalog,
         IReviewTaskService reviewTaskService,
         IConversationHistoryCompactionService conversationHistoryCompactionService,
+        IMasterOrchestrationAgent masterOrchestrationAgent,
         ILogger<ChatOrchestratorService> logger)
     {
         _conversationRepository = conversationRepository;
@@ -46,10 +46,10 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         _reviewTaskRepository = reviewTaskRepository;
         _auditEventRepository = auditEventRepository;
         _fileAssetRepository = fileAssetRepository;
-        _routingService = routingService;
         _agentCatalog = agentCatalog;
         _reviewTaskService = reviewTaskService;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
+        _masterOrchestrationAgent = masterOrchestrationAgent;
         _logger = logger;
     }
 
@@ -81,62 +81,54 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 DeduplicationKey: $"chat-user:{request.ClientMessageId ?? Guid.NewGuid().ToString("N")}"),
             cancellationToken);
 
-        // Each thread carries one active operation at a time, so routing first resolves that
-        // session state before deciding whether the message continues work or starts something new.
+        // Each thread carries one active operation at a time. We load session state and let the
+        // master agent decide whether to continue, start, or answer directly.
         var operations = await _operationRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var reviewTasks = await _reviewTaskRepository.ListByConversationAsync(conversation.Id, context.TenantId, cancellationToken);
         var activeOperation = ConversationSessionStateResolver.ResolveActiveOperation(conversation, operations);
-        if (ConversationSessionStateResolver.SyncConversationPointers(conversation, activeOperation))
-        {
-            conversation.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            await _conversationRepository.UpsertAsync(conversation, cancellationToken);
-        }
-        var routingDecision = await _routingService.DecideAsync(request.Message, conversation, operations, reviewTasks, attachments, cancellationToken);
-        _logger.LogInformation(
-            "Routing decision {DecisionType} selected for tenant {TenantId} conversation {ConversationId}. AgentId={AgentId} OperationId={OperationId} ReviewTaskId={ReviewTaskId} Explanation={Explanation}",
-            routingDecision.Type,
-            context.TenantId,
-            conversation.Id,
-            routingDecision.AgentId,
-            routingDecision.OperationId,
-            routingDecision.ReviewTaskId,
-            routingDecision.Explanation);
+        var activeReviewTask = ConversationSessionStateResolver.ResolveActiveReviewTask(activeOperation, reviewTasks);
 
-        switch (routingDecision.Type)
+        // Keep "approve/reject" chat replies stable by short-circuiting into the existing review handler.
+        if (activeReviewTask is not null &&
+            (request.Message.Contains("approve", StringComparison.OrdinalIgnoreCase) ||
+             request.Message.Contains("reject", StringComparison.OrdinalIgnoreCase) ||
+             request.Message.Contains("needs changes", StringComparison.OrdinalIgnoreCase)))
         {
-            case RoutingDecisionType.StartNewOperation:
-                await HandleStartNewOperationAsync(conversation, userMessage, routingDecision, attachments, context, cancellationToken);
-                break;
-            case RoutingDecisionType.ContinueOperation:
-                await HandleContinueOperationAsync(conversation, userMessage, routingDecision, attachments, context, cancellationToken);
-                break;
-            case RoutingDecisionType.RespondToReviewTask:
-                await HandleReviewResponseAsync(userMessage, routingDecision, request.Message, context, cancellationToken);
-                break;
-            case RoutingDecisionType.AskStatus:
-                await HandleStatusRequestAsync(conversation, userMessage, routingDecision, context, cancellationToken);
-                break;
-            case RoutingDecisionType.AnswerDirectly:
-                await AddAssistantMessageAsync(
-                    conversation.Id,
-                    context,
-                    routingDecision.AssistantMessage ?? "I can help with that.",
-                    null,
-                    "chat",
-                    sourceMessageId: userMessage.Id,
-                    deduplicationKey: $"assistant:{userMessage.Id}:chat");
-                break;
-            default:
-                await AddAssistantMessageAsync(
-                    conversation.Id,
-                    context,
-                    "I need a little more direction before I continue this thread. Tell me whether you want to continue the current workflow, review the pending step, ask for status, or start a new thread for different work.",
-                    null,
-                    "routing",
-                    sourceMessageId: userMessage.Id,
-                    deduplicationKey: $"assistant:{userMessage.Id}:routing");
-                break;
+            await HandleReviewResponseAsync(
+                userMessage,
+                new RoutingDecision(
+                    RoutingDecisionType.RespondToReviewTask,
+                    activeOperation?.AgentId,
+                    activeReviewTask.OperationId,
+                    activeReviewTask.Id,
+                    Explanation: "Chat text matched a review decision while a review task is open."),
+                request.Message,
+                context,
+                cancellationToken);
+
+            return (await GetSnapshotAsync(conversation.Id, context, cancellationToken))!;
         }
+
+        var masterResult = await _masterOrchestrationAgent.RunAsync(
+            new MasterOrchestrationRequest(
+                request.Message,
+                conversation,
+                userMessage,
+                operations,
+                reviewTasks,
+                attachments,
+                context),
+            cancellationToken);
+
+        await AddAssistantMessageAsync(
+            conversation.Id,
+            context,
+            masterResult.AssistantMessage,
+            masterResult.OperationId ?? conversation.ActiveOperationId,
+            "chat",
+            masterResult.Actions,
+            sourceMessageId: userMessage.Id,
+            deduplicationKey: $"master-agent:{userMessage.Id}");
 
         return (await GetSnapshotAsync(conversation.Id, context, cancellationToken))!;
     }

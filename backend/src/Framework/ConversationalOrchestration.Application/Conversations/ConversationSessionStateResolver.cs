@@ -4,7 +4,7 @@ using ConversationalOrchestration.Domain.Reviews;
 
 namespace ConversationalOrchestration.Application.Conversations;
 
-internal static class ConversationSessionStateResolver
+public static class ConversationSessionStateResolver
 {
     public static AgentOperation? ResolveActiveOperation(
         ConversationThread conversation,
