@@ -24,7 +24,7 @@ This repo contains a working sample implementation of that architecture using:
 - `Microsoft Agent Framework Workflows`
 - `MongoDB-backed workflow checkpoints and pending-request state`
 - `React + Vite`
-- `Microsoft.Extensions.AI` as the application-facing LLM abstraction
+- `Microsoft.Extensions.AI` as an infrastructure-facing LLM abstraction (Application stays framework-neutral)
 
 ## 2. Design Principles
 
@@ -36,7 +36,7 @@ This repo contains a working sample implementation of that architecture using:
 - Long-running workflows must survive delays, polling, retries, and human review.
 - Tenant isolation is enforced in storage and APIs, not delegated to prompts.
 - Auditability is built into every stage: message, routing, agent result, review, and workflow continuation.
-- LLM usage is provider-neutral at the application boundary; provider SDKs stay isolated in infrastructure.
+- LLM usage is provider-neutral at the application boundary; provider SDKs and framework-specific AI types stay isolated in infrastructure.
 - Multi-step requests should be executed deterministically via an application-owned plan and executor when enterprise safety, audit, and idempotency matter. See `docs/workflow-chaining-strategies.md`.
 
 ## 3. Scope
@@ -132,7 +132,7 @@ flowchart LR
     API --> CHAT["Chat Orchestrator Service"]
     API --> REV["Review Task Service"]
     API --> FILES["File Upload Service"]
-    API --> LLM["LLM Interaction Layer (Microsoft.Extensions.AI)"]
+    API --> LLM["LLM Interaction Ports (Application)"]
 
     ROUTER --> AGENTS["Agent Catalog"]
     AGENTS --> NOTICE["Notice Creation Agent"]
@@ -141,7 +141,8 @@ flowchart LR
     ROUTER --> LLM
     NOTICE --> LLM
     ONEPAGER --> LLM
-    LLM --> PROVIDER["Provider Adapter (swappable)"]
+    LLM --> AIINFRA["LLM Infrastructure (Microsoft.Extensions.AI)"]
+    AIINFRA --> PROVIDER["Provider Adapter (swappable)"]
     PROVIDER --> MODEL["Model Provider Endpoint"]
 
     ONBOARD --> WFRT["Workflow Runtime Service"]
@@ -184,7 +185,12 @@ Determines whether a message:
 - starts new work
 - is ambiguous and needs clarification
 
-The recommended implementation uses an LLM-backed structured classifier behind a provider-neutral abstraction. The routing service should depend on `Microsoft.Extensions.AI` interfaces or a thin application wrapper on top of them, not on a provider SDK directly.
+The recommended implementation uses an LLM-backed structured classifier behind a provider-neutral **application port** (interface).
+
+Design constraint:
+
+- `ConversationalOrchestration.Application` should not expose or depend on `Microsoft.Extensions.AI` or provider SDK types.
+- `ConversationalOrchestration.Infrastructure` can use `Microsoft.Extensions.AI` and provider SDKs to implement those ports.
 
 ### Agent Catalog
 
@@ -208,23 +214,32 @@ This keeps the system safe while still making clarification loops natural for us
 
 This layer is responsible for all model calls that support routing and agent slot-filling.
 
-- application code depends on `Microsoft.Extensions.AI` abstractions such as `IChatClient`
-- infrastructure provides the concrete adapter package
-- the current default adapter can be `Microsoft.Extensions.AI.OpenAI`
-- the underlying provider SDK such as `OpenAI` should stay hidden behind the infrastructure adapter
+- application code depends on narrow orchestration ports, for example:
+  - `IMultiTurnStructuredAgentClient` (multi-turn structured output)
+  - `IStructuredLlmClient` (single-turn structured output)
+  - `IAgentInputCompletionService` (slot filling)
+- infrastructure provides:
+  - `Microsoft.Extensions.AI` chat clients
+  - the concrete adapter package (example: `Microsoft.Extensions.AI.OpenAI`)
+  - the underlying provider SDK (example: `OpenAI`), hidden behind infrastructure
 - a future swap to Azure OpenAI, Anthropic, Gemini, or another OpenAI-compatible endpoint should require only infrastructure changes
-- the application should expose narrow use-case-specific services such as:
-  - `IMessageIntentClassifier`
-  - `IAgentInputCompletionService`
-  - optional future `IStructuredLlmClient`
 
 This avoids vendor lock-in while keeping the business code focused on orchestration and validation.
 
 Recommended package strategy:
 
-- application-facing abstraction: `Microsoft.Extensions.AI`
+- infrastructure-facing abstraction: `Microsoft.Extensions.AI`
 - current adapter: `Microsoft.Extensions.AI.OpenAI`
 - current provider SDK hidden in infrastructure: `OpenAI`
+
+### Conversation History and Multi-Turn (Option A)
+
+This sample uses **Option A** for multi-turn:
+
+- MongoDB is the system of record (SOR) for the user-visible transcript (`conversation_messages`).
+- The Agent Framework is used to load chat history for prompts via a **read-only** chat history provider:
+  - `MongoConversationChatHistoryProvider` fetches reduced history from Mongo (compaction).
+- Framework multi-turn sessions are treated as ephemeral for each run; the stable memory is Mongo.
 
 ### Workflow Runtime
 
@@ -319,7 +334,7 @@ Each incoming message must resolve to one of:
 
 ### Important behavior
 
-One conversation can contain multiple active operations at the same time. A new request should not hijack an existing workflow unless the message clearly continues that workflow.
+One conversation can contain many operations over time, but at most **one active operation at a time** in a single thread/session. A new request should not hijack an active workflow; the user should either continue the active work or start a new conversation/thread for unrelated work.
 
 ## 8.1 Scenario Catalog
 
@@ -338,8 +353,8 @@ The table below captures the expected behavior for the most important runtime si
 | Reviewer approves extraction | Complete operation and create draft-ready state | operation completed, route persisted, audit event appended |
 | Reviewer rejects a task | Pause operation for correction | review task rejected, operation set to `ClarificationRequired` |
 | User asks for status with one active operation | Return status for that operation | assistant/system message appended |
-| User asks for status with multiple active operations | Return summary of all active work, or specific one if referenced | assistant/system message appended |
-| User asks a different question mid-workflow | Start a new operation if the request is clearly new | second operation in same conversation |
+| User asks for status without an active operation | Return a thread-level status message | assistant/system message appended |
+| User asks a different question mid-workflow | Ask them to continue current work or start a new thread | no new operation started in this thread |
 | User says “approve it” and only one review is open | Auto-route to that review task | review decision stored, workflow may continue |
 | User says “approve it” and multiple reviews are open | Ask for clarification | no workflow resumed until clarified |
 | User opens a previous thread | Load summaries then full snapshot | conversation history list + selected snapshot |
@@ -403,7 +418,7 @@ sequenceDiagram
     participant API as "Orchestrator API"
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Message Routing Service"
-    participant LLM as "LLM Interaction Layer"
+    participant LLM as "LLM Interaction Layer (ports)"
     participant AGENT as "Selected Agent"
     participant DB as "MongoDB"
 
@@ -412,7 +427,7 @@ sequenceDiagram
     API->>CHAT: HandleMessageAsync
     CHAT->>DB: Store user message
     CHAT->>ROUTER: Decide(message, conversation, operations, reviewTasks)
-    ROUTER->>LLM: Structured intent classification
+    ROUTER->>LLM: Structured intent classification (multi-turn, history from Mongo)
     LLM-->>ROUTER: Routing decision JSON
     ROUTER-->>CHAT: Routing decision
     CHAT->>AGENT: Start or continue operation
@@ -435,7 +450,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "Notice Creation Agent"
-    participant LLM as "LLM Interaction Layer"
+    participant LLM as "LLM Interaction Layer (ports)"
     participant DB as "MongoDB"
 
     U->>UI: "Create a capital call notice for Apex Fund I for $3,500,000"
@@ -445,7 +460,7 @@ sequenceDiagram
     ROUTER-->>CHAT: Start notice operation
     CHAT->>DB: Create operation
     CHAT->>AGENT: StartAsync
-    AGENT->>LLM: Extract structured fields from latest message + operation history
+    AGENT->>LLM: Extract structured fields (multi-turn, history loaded from Mongo)
     LLM-->>AGENT: fundName, amount, optional noticeDate
     AGENT->>AGENT: Validate required inputs in code
 
@@ -541,7 +556,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "One Pager Agent"
-    participant LLM as "LLM Interaction Layer"
+    participant LLM as "LLM Interaction Layer (ports)"
     participant DB as "MongoDB"
 
     U->>UI: Upload format and ask for one-pager
@@ -553,7 +568,7 @@ sequenceDiagram
     CHAT->>ROUTER: Classify new work
     ROUTER-->>CHAT: Start one-pager operation
     CHAT->>AGENT: StartAsync
-    AGENT->>LLM: Extract company and template from prompt + scoped history
+    AGENT->>LLM: Extract fields (multi-turn, history loaded from Mongo)
     LLM-->>AGENT: structured candidate values
     AGENT->>AGENT: Validate required inputs in code
 
@@ -567,7 +582,7 @@ sequenceDiagram
     end
 ```
 
-### 10.6 Same conversation, different request mid-workflow
+### 10.6 Same conversation, different request mid-workflow (single active operation)
 
 ```mermaid
 sequenceDiagram
@@ -579,20 +594,18 @@ sequenceDiagram
     participant ROUTER as "Routing Service"
     participant DB as "MongoDB"
 
-    Note over DB: Operation A = Fund Onboarding, status WaitingForHumanReview
+    Note over DB: Operation A is active and waiting for human review
 
     U->>UI: "Generate a one-pager for BlueWave Systems"
     UI->>API: POST message in same conversation
     API->>CHAT: HandleMessageAsync
     CHAT->>DB: Load active operations and open review tasks
     CHAT->>ROUTER: Decide(message, operations, reviewTasks)
-    ROUTER-->>CHAT: StartNewOperation for One Pager
-    CHAT->>DB: Create Operation B
-    CHAT->>DB: Keep Operation A unchanged
-    CHAT-->>UI: Same conversation now shows multiple operations
+    ROUTER-->>CHAT: AnswerDirectly (cannot start new work while operation is active)
+    CHAT->>DB: Append assistant message instructing to continue current work or start a new thread
+    CHAT-->>UI: User sees guidance without starting a second operation
 
-    Note over UI: Conversation remains single-threaded for the user
-    Note over DB: Execution remains isolated by OperationId
+    Note over DB: The user-visible thread stays focused on one active operation
 ```
 
 ### 10.7 Previous conversation threads
@@ -628,7 +641,7 @@ sequenceDiagram
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
     participant AGENT as "Notice or One Pager Agent"
-    participant LLM as "LLM Interaction Layer"
+    participant LLM as "LLM Interaction Layer (ports)"
     participant DB as "MongoDB"
 
     U->>UI: Initial request with missing fields
@@ -637,7 +650,7 @@ sequenceDiagram
     CHAT->>ROUTER: Decide
     ROUTER-->>CHAT: StartNewOperation
     CHAT->>AGENT: StartAsync
-    AGENT->>LLM: Extract available field values
+    AGENT->>LLM: Extract available field values (multi-turn, history loaded from Mongo)
     LLM-->>AGENT: partial field set
     AGENT-->>CHAT: ClarificationRequired
     CHAT->>DB: Save operation state
@@ -649,7 +662,7 @@ sequenceDiagram
     CHAT->>ROUTER: Decide
     ROUTER-->>CHAT: ContinueOperation
     CHAT->>AGENT: ContinueAsync
-    AGENT->>LLM: Extract newly provided fields from follow-up
+    AGENT->>LLM: Extract newly provided fields (multi-turn, history loaded from Mongo)
     LLM-->>AGENT: updated field values
     AGENT-->>CHAT: Completed with action
     CHAT->>DB: Update operation and append assistant reply
@@ -680,7 +693,7 @@ sequenceDiagram
     CHAT-->>UI: Ask user which review task to approve
 ```
 
-### 10.10 Status query while multiple operations are active
+### 10.10 Status query (single active operation)
 
 ```mermaid
 sequenceDiagram
@@ -690,18 +703,19 @@ sequenceDiagram
     participant API as "Orchestrator API"
     participant CHAT as "Chat Orchestrator"
     participant ROUTER as "Routing Service"
+    participant AGENT as "Active Agent"
     participant DB as "MongoDB"
-
-    Note over DB: Multiple active operations exist for the same conversation
 
     U->>UI: "What's the status?"
     UI->>API: POST message
     API->>CHAT: HandleMessageAsync
     CHAT->>ROUTER: Decide
     ROUTER-->>CHAT: AskStatus
-    CHAT->>DB: Load active operations
-    CHAT->>DB: Append status summary message
-    CHAT-->>UI: Show active work summary in-thread
+    CHAT->>DB: Load active operation (if any)
+    CHAT->>AGENT: DescribeStatusAsync(operation)
+    AGENT-->>CHAT: Status summary text
+    CHAT->>DB: Append status message
+    CHAT-->>UI: Show status in-thread
 ```
 
 ### 10.11 Review rejection path
@@ -763,7 +777,7 @@ This separation gives:
 - resumability
 - cleaner retries
 - stronger auditability
-- support for multiple operations in one thread
+- support for multiple operations over time (with one active operation at a time per thread)
 
 ## 12. Data Isolation and Auditability
 
