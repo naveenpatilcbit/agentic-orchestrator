@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Application.Conversations;
 using ConversationalOrchestration.Application.Support;
@@ -22,7 +23,8 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
     };
 
     private static readonly Lazy<Func<AgentSession>> SessionFactory = new(MultiTurnStructuredAgentClientAccessor.CreateSessionFactory);
