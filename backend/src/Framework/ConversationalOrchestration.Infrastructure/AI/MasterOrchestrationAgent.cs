@@ -4,6 +4,7 @@ using System.Text.Json.Serialization.Metadata;
 using ConversationalOrchestration.Application.Abstractions;
 using ConversationalOrchestration.Application.Conversations;
 using ConversationalOrchestration.Application.Support;
+using ConversationalOrchestration.Domain.Agents;
 using ConversationalOrchestration.Domain.Conversations;
 using ConversationalOrchestration.Domain.Files;
 using ConversationalOrchestration.Domain.Operations;
@@ -38,6 +39,7 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
     private readonly IConversationTranscriptService _conversationTranscriptService;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
     private readonly IAgentOperationRepository _operationRepository;
+    private readonly IOperationOutputRepository _operationOutputRepository;
     private readonly ILogger<MasterOrchestrationAgent> _logger;
 
     public MasterOrchestrationAgent(
@@ -50,6 +52,7 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         IConversationTranscriptService conversationTranscriptService,
         IConversationHistoryCompactionService conversationHistoryCompactionService,
         IAgentOperationRepository operationRepository,
+        IOperationOutputRepository operationOutputRepository,
         ILogger<MasterOrchestrationAgent> logger)
     {
         _chatClientFactory = chatClientFactory;
@@ -61,6 +64,7 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         _conversationTranscriptService = conversationTranscriptService;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
         _operationRepository = operationRepository;
+        _operationOutputRepository = operationOutputRepository;
         _logger = logger;
     }
 
@@ -143,12 +147,12 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         var tools = new List<AITool>
         {
             AIFunctionFactory.Create(
-                (string agentId, CancellationToken ct) => StartAgentOperationAsync(agentId, state, ct),
+                (string agentId, Dictionary<string, string?>? seedValues, CancellationToken ct) => StartAgentOperationAsync(agentId, seedValues, state, ct),
                 new AIFunctionFactoryOptions
                 {
                     SerializerOptions = JsonOptions,
                     Name = "start_agent_operation",
-                    Description = "Start a new operation for the specified agent id in the current conversation."
+                    Description = "Start a new operation for the specified agent id in the current conversation. Optionally provide seedValues to pre-fill required inputs."
                 }),
 
             AIFunctionFactory.Create(
@@ -176,7 +180,7 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         {
             var toolName = $"start_{SanitizeFunctionName(agent.Id)}";
             tools.Add(AIFunctionFactory.Create(
-                (CancellationToken ct) => StartAgentOperationAsync(agent.Id, state, ct),
+                (Dictionary<string, string?>? seedValues, CancellationToken ct) => StartAgentOperationAsync(agent.Id, seedValues, state, ct),
                 new AIFunctionFactoryOptions
                 {
                     SerializerOptions = JsonOptions,
@@ -213,18 +217,12 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
 
     private async Task<string> StartAgentOperationAsync(
         string agentId,
+        Dictionary<string, string?>? seedValues,
         MasterAgentRunState state,
         CancellationToken cancellationToken)
     {
         var request = state.Request;
         var conversation = request.Conversation;
-
-        var operations = await _operationRepository.ListByConversationAsync(conversation.Id, request.Context.TenantId, cancellationToken);
-        var activeOperation = ConversationSessionStateResolver.ResolveActiveOperation(conversation, operations);
-        if (activeOperation is not null)
-        {
-            return $"This conversation already has active work: {activeOperation.Title}. Continue it here, or start a new conversation for separate work.";
-        }
 
         if (string.IsNullOrWhiteSpace(agentId))
         {
@@ -232,6 +230,21 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         }
 
         var agent = _agentCatalog.Resolve(agentId);
+        var values = seedValues is null
+            ? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string?>(seedValues, StringComparer.OrdinalIgnoreCase);
+
+        // If the agent requires a completed source output and none was provided, try to use the latest compatible one.
+        if (agent.Definition.SourceRequirements?.RequiresSource == true &&
+            !values.ContainsKey(StandardAgentInputNames.SourceOutputId))
+        {
+            var source = await TryResolveLatestCompatibleSourceAsync(agent.Definition, conversation.Id, request.Context.TenantId, cancellationToken);
+            if (source is not null)
+            {
+                values[StandardAgentInputNames.SourceOutputId] = source.Value.OutputId;
+                values[StandardAgentInputNames.SourceOperationId] = source.Value.OperationId;
+            }
+        }
 
         var operation = new AgentOperation
         {
@@ -240,7 +253,8 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
             AgentId = agent.Definition.Id,
             Title = agent.Definition.DisplayName,
             CreatedByUserId = request.Context.UserId,
-            Status = AgentOperationStatus.Received
+            Status = AgentOperationStatus.Received,
+            DataJson = values.Count == 0 ? null : JsonContent.Serialize(values)
         };
 
         await _operationRepository.UpsertAsync(operation, cancellationToken);
@@ -289,6 +303,27 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         await PersistOperationStateAsync(conversation, result.Operation, request.Context, cancellationToken);
         state.SetLastResult(result);
         return result.AssistantMessage;
+    }
+
+    private async Task<(string OutputId, string OperationId)?> TryResolveLatestCompatibleSourceAsync(
+        AgentDefinition definition,
+        string conversationId,
+        string tenantId,
+        CancellationToken cancellationToken)
+    {
+        var accepted = definition.SourceRequirements?.AcceptedOutputTypes;
+        if (accepted is null || accepted.Count == 0)
+        {
+            return null;
+        }
+
+        var outputs = await _operationOutputRepository.ListByConversationAsync(conversationId, tenantId, cancellationToken);
+        var match = outputs
+            .Where(output => accepted.Contains(output.OutputType, StringComparer.OrdinalIgnoreCase))
+            .OrderByDescending(output => output.UpdatedAtUtc)
+            .FirstOrDefault();
+
+        return match is null ? null : (match.Id, match.OperationId);
     }
 
     private async Task<string> ContinueActiveOperationAsync(
@@ -394,7 +429,8 @@ public sealed class MasterOrchestrationAgent : IMasterOrchestrationAgent
         You can execute work by calling tools.
         - Use tools to start or continue workflows.
         - Prefer continuing the active operation if the user is responding to the current task.
-        - Only start a new operation when there is no active operation in this conversation.
+        - Multiple operations can exist in the same conversation. When the user requests a multi-step sequence, keep it sequential and do not start later steps until prerequisites are satisfied.
+        - If a step requires human review/approval, stop and instruct the user to complete the approval, then ask you to continue.
 
         Output rules:
         - After tool calls, respond with one concise user-facing message.
