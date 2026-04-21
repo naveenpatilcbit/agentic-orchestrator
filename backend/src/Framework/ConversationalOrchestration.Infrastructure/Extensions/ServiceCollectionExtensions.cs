@@ -28,8 +28,6 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddConversationalOrchestrationInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
-        MongoSerializationConventions.EnsureRegistered();
-
         services.Configure<MongoDbOptions>(configuration.GetSection(MongoDbOptions.SectionName));
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
         services.Configure<LlmGatewayOptions>(configuration.GetSection(LlmGatewayOptions.SectionName));
