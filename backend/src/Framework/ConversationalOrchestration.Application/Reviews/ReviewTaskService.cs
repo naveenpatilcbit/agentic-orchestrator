@@ -21,6 +21,7 @@ public sealed class ReviewTaskService : IReviewTaskService
     private readonly IAuditEventRepository _auditEventRepository;
     private readonly IReviewPayloadRevisionService _reviewPayloadRevisionService;
     private readonly IReadOnlyCollection<IReviewContinuationHandler> _reviewContinuationHandlers;
+    private readonly IPlanContinuationService _planContinuationService;
     private readonly ILogger<ReviewTaskService> _logger;
 
     public ReviewTaskService(
@@ -30,6 +31,7 @@ public sealed class ReviewTaskService : IReviewTaskService
         IConversationTranscriptService conversationTranscriptService,
         IAuditEventRepository auditEventRepository,
         IReviewPayloadRevisionService reviewPayloadRevisionService,
+        IPlanContinuationService planContinuationService,
         IEnumerable<IReviewContinuationHandler> reviewContinuationHandlers,
         ILogger<ReviewTaskService> logger)
     {
@@ -39,6 +41,7 @@ public sealed class ReviewTaskService : IReviewTaskService
         _conversationTranscriptService = conversationTranscriptService;
         _auditEventRepository = auditEventRepository;
         _reviewPayloadRevisionService = reviewPayloadRevisionService;
+        _planContinuationService = planContinuationService;
         _reviewContinuationHandlers = reviewContinuationHandlers.ToArray();
         _logger = logger;
     }
@@ -50,6 +53,46 @@ public sealed class ReviewTaskService : IReviewTaskService
         CancellationToken cancellationToken)
     {
         var result = await ApplyDecisionAsync(reviewTaskId, request, context, cancellationToken);
+        // Load the persisted review task so we can apply post-processing (plan continuation and transcript behavior).
+        var updatedReviewTask = await _reviewTaskRepository.GetAsync(reviewTaskId, context.TenantId, cancellationToken);
+
+        // If a multi-step plan is active, approvals should trigger the next master-agent run automatically.
+        if (updatedReviewTask is not null && updatedReviewTask.Status == ReviewTaskStatus.Approved)
+        {
+            var continuation = await _planContinuationService.TryContinueAfterReviewApprovalAsync(
+                updatedReviewTask,
+                context,
+                cancellationToken);
+
+            if (continuation is not null && !string.IsNullOrWhiteSpace(continuation.AssistantMessage))
+            {
+                await _conversationTranscriptService.AppendAsync(
+                    new ConversationTranscriptAppendRequest(
+                        context.TenantId,
+                        continuation.ConversationId,
+                        "system",
+                        ConversationMessageRole.Assistant,
+                        continuation.AssistantMessage,
+                        MessageKind: "plan-continuation",
+                        OperationId: continuation.OperationId,
+                        Actions: continuation.Actions,
+                        SourceType: "plan-continuation",
+                        SourceMessageId: reviewTaskId,
+                        DeduplicationKey: $"plan-continuation-assistant:{reviewTaskId}"),
+                    cancellationToken);
+
+                return continuation;
+            }
+        }
+
+        // Avoid transcript spam for workflow-driven capital call reviews: the workflow/operation state already
+        // surfaces the right next prompt (e.g., "open review queue", "allocations ready for confirmation").
+        if (updatedReviewTask is not null &&
+            updatedReviewTask.TaskType.StartsWith("CapitalCall", StringComparison.Ordinal))
+        {
+            return result;
+        }
+
         if (!string.IsNullOrWhiteSpace(result.ConversationId) &&
             !string.IsNullOrWhiteSpace(result.AssistantMessage))
         {
@@ -62,6 +105,7 @@ public sealed class ReviewTaskService : IReviewTaskService
                     result.AssistantMessage,
                     "review",
                     OperationId: result.OperationId,
+                    Actions: result.Actions,
                     SourceType: "review-decision",
                     SourceMessageId: reviewTaskId,
                     DeduplicationKey: $"review-submit:{reviewTaskId}:{request.ClientRequestId ?? Guid.NewGuid().ToString("N")}"),

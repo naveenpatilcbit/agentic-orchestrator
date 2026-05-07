@@ -29,6 +29,12 @@ public interface IConversationMessageRepository
         CancellationToken cancellationToken);
 }
 
+public interface IConversationPlanRepository
+{
+    Task<ConversationPlan?> GetActiveAsync(string conversationId, string tenantId, CancellationToken cancellationToken);
+    Task UpsertAsync(ConversationPlan plan, CancellationToken cancellationToken);
+}
+
 public interface IConversationHistoryCompactionService
 {
     Task RefreshAsync(
@@ -409,7 +415,8 @@ public sealed record AgentExecutionResult(
 public sealed record ChatInteractionResult(
     string AssistantMessage,
     string ConversationId,
-    string? OperationId = null);
+    string? OperationId = null,
+    IReadOnlyCollection<AgentAction>? Actions = null);
 
 public sealed record ReviewPayloadRevisionResult(
     bool Success,

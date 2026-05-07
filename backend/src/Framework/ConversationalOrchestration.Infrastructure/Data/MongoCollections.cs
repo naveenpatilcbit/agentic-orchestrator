@@ -25,6 +25,12 @@ public sealed class MongoCollections
     public IMongoCollection<ConversationMessage> Messages =>
         _database.GetCollection<ConversationMessage>("conversation_messages");
 
+    public IMongoCollection<ConversationPlan> ConversationPlans =>
+        _database.GetCollection<ConversationPlan>("conversation_plans");
+
+    public IMongoCollection<AgentSessionHistory> AgentSessionHistories =>
+        _database.GetCollection<AgentSessionHistory>("agent_session_histories");
+
     public IMongoCollection<AgentOperation> Operations =>
         _database.GetCollection<AgentOperation>("operations");
 

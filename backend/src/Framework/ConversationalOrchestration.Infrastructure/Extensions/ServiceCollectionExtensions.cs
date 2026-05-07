@@ -8,6 +8,7 @@ using ConversationalOrchestration.Infrastructure.Conversations;
 using ConversationalOrchestration.Infrastructure.Data;
 using ConversationalOrchestration.Infrastructure.Files;
 using ConversationalOrchestration.Infrastructure.Repositories;
+using ConversationalOrchestration.Infrastructure.Services;
 using ConversationalOrchestration.Infrastructure.Workflows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +24,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IAgentCatalog, AgentCatalog>();
         services.AddScoped<IChatOrchestratorService, ChatOrchestratorService>();
         services.AddScoped<IReviewTaskService, ReviewTaskService>();
+        services.AddScoped<IConversationPlanService, ConversationPlanService>();
+        services.AddScoped<IPlanContinuationService, PlanContinuationService>();
         return services;
     }
 
@@ -38,6 +41,8 @@ public static class ServiceCollectionExtensions
             return new MongoClient(options.ConnectionString);
         });
 
+        services.AddSingleton<ICurrencyConversionService, DummyCurrencyConversionService>();
+
         services.AddSingleton<MicrosoftExtensionsAiStructuredLlmClient>();
         services.AddSingleton<IStructuredLlmClient>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
         services.AddSingleton<ConversationalOrchestration.Infrastructure.AI.ILlmChatClientFactory>(serviceProvider => serviceProvider.GetRequiredService<MicrosoftExtensionsAiStructuredLlmClient>());
@@ -52,6 +57,7 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<MongoIndexInitializationService>();
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddScoped<IConversationMessageRepository, ConversationMessageRepository>();
+        services.AddScoped<IConversationPlanRepository, ConversationPlanRepository>();
         services.AddScoped<IAgentOperationRepository, AgentOperationRepository>();
         services.AddScoped<IOperationOutputRepository, OperationOutputRepository>();
         services.AddScoped<IReviewTaskRepository, ReviewTaskRepository>();

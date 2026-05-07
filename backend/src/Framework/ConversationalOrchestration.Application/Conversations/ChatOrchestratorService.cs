@@ -23,6 +23,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
     private readonly IReviewTaskService _reviewTaskService;
     private readonly IConversationHistoryCompactionService _conversationHistoryCompactionService;
     private readonly IMasterOrchestrationAgent _masterOrchestrationAgent;
+    private readonly IConversationPlanService _conversationPlanService;
     private readonly ILogger<ChatOrchestratorService> _logger;
 
     public ChatOrchestratorService(
@@ -37,6 +38,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         IReviewTaskService reviewTaskService,
         IConversationHistoryCompactionService conversationHistoryCompactionService,
         IMasterOrchestrationAgent masterOrchestrationAgent,
+        IConversationPlanService conversationPlanService,
         ILogger<ChatOrchestratorService> logger)
     {
         _conversationRepository = conversationRepository;
@@ -50,6 +52,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
         _reviewTaskService = reviewTaskService;
         _conversationHistoryCompactionService = conversationHistoryCompactionService;
         _masterOrchestrationAgent = masterOrchestrationAgent;
+        _conversationPlanService = conversationPlanService;
         _logger = logger;
     }
 
@@ -68,7 +71,7 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
             attachments.Count,
             request.Message.Length);
 
-        var userMessage = await _conversationTranscriptService.AppendAsync(
+         var userMessage = await _conversationTranscriptService.AppendAsync(
             new ConversationTranscriptAppendRequest(
                 context.TenantId,
                 conversation.Id,
@@ -80,6 +83,8 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 SourceMessageId: request.ClientMessageId,
                 DeduplicationKey: $"chat-user:{request.ClientMessageId ?? Guid.NewGuid().ToString("N")}"),
             cancellationToken);
+
+        var plan = await _conversationPlanService.TryCreateAsync(request.Message, conversation, context, cancellationToken);
 
         // Each thread carries one active operation at a time. We load session state and let the
         // master agent decide whether to continue, start, or answer directly.
@@ -120,11 +125,18 @@ public sealed class ChatOrchestratorService : IChatOrchestratorService
                 context),
             cancellationToken);
 
+        // POC: if the user provided a multi-step plan and we just handled the first user message,
+        // assume the first step was started and advance the plan pointer once.
+        if (plan is not null && plan.NextStepIndex == 0 && plan.Steps.Count > 0)
+        {
+            await _conversationPlanService.AdvanceAsync(conversation.Id, context, nextStepIndex: 1, cancellationToken);
+        }
+
         await AddAssistantMessageAsync(
             conversation.Id,
             context,
             masterResult.AssistantMessage,
-            masterResult.OperationId ?? conversation.ActiveOperationId,
+            masterResult.OperationId,
             "chat",
             masterResult.Actions,
             sourceMessageId: userMessage.Id,

@@ -79,6 +79,31 @@ public sealed class ConversationMessageRepository : IConversationMessageReposito
     }
 }
 
+public sealed class ConversationPlanRepository : IConversationPlanRepository
+{
+    private readonly MongoCollections _collections;
+
+    public ConversationPlanRepository(MongoCollections collections)
+    {
+        _collections = collections;
+    }
+
+    public async Task<ConversationPlan?> GetActiveAsync(string conversationId, string tenantId, CancellationToken cancellationToken) =>
+        await _collections.ConversationPlans.Find(item =>
+                item.ConversationId == conversationId &&
+                item.TenantId == tenantId &&
+                item.Status == ConversationPlanStatus.Active)
+            .SortByDescending(item => item.UpdatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public Task UpsertAsync(ConversationPlan plan, CancellationToken cancellationToken) =>
+        _collections.ConversationPlans.ReplaceOneAsync(
+            item => item.Id == plan.Id && item.TenantId == plan.TenantId,
+            plan,
+            new ReplaceOptions { IsUpsert = true },
+            cancellationToken);
+}
+
 public sealed class AgentOperationRepository : IAgentOperationRepository
 {
     private readonly MongoCollections _collections;
